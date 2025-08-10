@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "module": "esnext",              // import.meta.env 사용 가능하게
+    "moduleResolution": "node",
+    "target": "esnext",
+    "jsx": "preserve",
+    "strict": true,                  // JS도 타입체크 강화
+    "checkJs": true,                 // JS 파일에서도 타입 체크
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}
