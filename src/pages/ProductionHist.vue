@@ -552,8 +552,8 @@ onUnmounted(() => {
           <col style="width:8rem"/>
           <col style="width:6.5rem"/>   <!-- length_mm -->
           <col style="width:6.5rem"/>   <!-- qty -->
-          <col style="width:10rem"/>    <!-- Total header -->
-          <col style="width:8.5rem"/>   <!-- 액션 -->
+          
+          <col style="width:11rem"/>   <!-- 액션 -->
         </colgroup>
 
         <thead>
@@ -587,8 +587,13 @@ onUnmounted(() => {
             <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('qty')">
               qty <span v-if="sortKey==='qty'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center">Total: <b>{{ totalQty }}</b></th>
-            <th class="th th-center">액션</th>
+            <th class="th th-center">
+              <div class="flex items-center justify-center gap-2">
+                <span class="text-gray-300">•</span>
+                <span>Total Qty: <b>{{ totalQty }}</b></span>
+              </div>
+            </th>
+
           </tr>
 
           <!-- 2줄: 필터 -->
@@ -685,10 +690,7 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- Total 열: 필터 없음 -->
-            <th></th>
-
-            <!-- 액션 라벨 -->
+              <!-- 액션 라벨 -->
             <th class="px-3 py-2 text-center text-xs text-gray-500">액션</th>
           </tr>
         </thead>
@@ -710,7 +712,6 @@ onUnmounted(() => {
               <td class="px-3 py-2 text-center">{{ r.process }}</td>
               <td class="px-3 py-2 text-center">{{ r.length_mm }}</td>
               <td class="px-3 py-2 text-center">{{ r.qty }}</td>
-              <td class="px-3 py-2 text-center">—</td>
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
                   <button type="button" class="btn" @click="startEdit(r)">수정</button>
@@ -773,8 +774,6 @@ onUnmounted(() => {
               <td class="px-3 py-2">
                 <input type="number" v-model.number="editCache!.qty" class="input compact-input"/>
               </td>
-
-              <td class="px-3 py-2 text-center">—</td>
 
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
