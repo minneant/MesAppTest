@@ -5,6 +5,7 @@ import {
   collection, getDocs, orderBy, query, limit,
   doc, setDoc, deleteDoc, serverTimestamp, writeBatch
 } from "firebase/firestore";
+import { useMasters } from "@/composables/useMasters";
 
 /* ---------------- Types ---------------- */
 type ProdRow = {
@@ -21,18 +22,54 @@ type ProdRow = {
   qty: number;
 };
 
-/* ---------------- Masters ---------------- */
-const TYPE_MASTER = ["ST1","ST2","HD1","HD2","EL1","EL2","END","CON","PCO"];
-const LINE_MASTER = ["LIQ","VAP","BOG","30T","40T","50T","60T","80T"];
-const PROCESS_MASTER = [
-  "Cutting_Wire","Foaming","Planing","Cutting_length","FRP_Coating",
-  "Al_Coating","Cutting_Elbow","Glue","Sanding","Packaging","Shipping"
-];
-const PROCESS_TAGS: Record<string,string> = {
-  Cutting_Wire:"cw", Foaming:"fo", Planing:"pl", Cutting_length:"cl",
-  FRP_Coating:"fc", Al_Coating:"ac", Cutting_Elbow:"ce", Glue:"gl",
-  Sanding:"sa", Packaging:"pa", Shipping:"sh",
-};
+/* ---------------- Masters (from DB) ---------------- */
+const { types, lines, processes } = useMasters();
+const TYPE_CODES = computed(() => (types.value || []).map(t => t.code));
+const LINE_CODES = computed(() => (lines.value || []).map(l => l.code));
+const PROCESS_CODES = computed(() => (processes.value || []).map(p => p.code));
+const PROCESS_TAG_MAP = computed<Record<string,string>>(() => {
+  const m: Record<string,string> = {};
+  (processes.value || []).forEach((p:any) => { m[p.code] = p.tag || ""; });
+  return m;
+});
+const tagOf = (proc?: string) => (proc ? (PROCESS_TAG_MAP.value[proc] || "") : "");
+
+/* ---------------- Utils ---------------- */
+const lc = (s?: string) => (s ?? "").toLowerCase();
+function tsMs(v:any): number {
+  if (!v) return 0;
+  if (typeof v?.toDate === "function") return v.toDate().getTime();
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? 0 : d.getTime();
+  }
+  return 0;
+}
+function fmtTsShort(v:any) {
+  const ms = tsMs(v); if (!ms) return "";
+  const d = new Date(ms); const p=(n:number)=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function formatIso(v:any) {
+  const ms = tsMs(v); return ms ? new Date(ms).toISOString() : "";
+}
+function localIsoMinute(d: Date = new Date()) {
+  const t = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+  return t.toISOString().slice(0, 16);
+}
+function buildItemId(type: string, line: string, inch: number, tag: string, length_mm: number) {
+  return `${type}_${line}_${inch}_${tag}_L${length_mm}`;
+}
+function buildLotId(itemId: string, tsVal: any) {
+  const d = new Date(tsMs(tsVal));
+  const p = (n:number)=>String(n).padStart(2,"0");
+  const y = d.getFullYear();
+  const m = p(d.getMonth()+1);
+  const dd = p(d.getDate());
+  return `${itemId}_${y}${m}${dd}`;
+}
 
 /* ---------------- State ---------------- */
 const rows = ref<ProdRow[]>([]);
@@ -83,28 +120,6 @@ async function load() {
   } finally {
     loading.value = false;
   }
-}
-
-/* ---------------- Helpers ---------------- */
-const lc = (s?: string) => (s ?? "").toLowerCase();
-function tsMs(v:any): number {
-  if (!v) return 0;
-  if (typeof v?.toDate === "function") return v.toDate().getTime();
-  if (v instanceof Date) return v.getTime();
-  if (typeof v === "number") return v;
-  if (typeof v === "string") {
-    const d = new Date(v);
-    return isNaN(d.getTime()) ? 0 : d.getTime();
-  }
-  return 0;
-}
-function fmtTsShort(v:any) {
-  const ms = tsMs(v); if (!ms) return "";
-  const d = new Date(ms); const p=(n:number)=>String(n).padStart(2,"0");
-  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-function formatIso(v:any) {
-  const ms = tsMs(v); return ms ? new Date(ms).toISOString() : "";
 }
 
 /* ---------- 동적 옵션 생성을 위한 필터 ---------- */
@@ -178,17 +193,85 @@ watch([fInchOpts],     () => { fInches.value    = pruneMulti(fInches.value,    n
 watch([fLengthOpts],   () => { fLens.value      = pruneMulti(fLens.value,      new Set(fLengthOpts.value)) as number[]; });
 watch([fQtyOpts],      () => { fQtys.value      = pruneMulti(fQtys.value,      new Set(fQtyOpts.value)) as number[]; });
 
+/* ---------------- Create (새 항목) ---------------- */
+const showCreate = ref(false);
+const createType = ref<string>("");
+const createLine = ref<string>("");
+const createInch = ref<number | null>(null);
+const createProcess = ref<string>("");
+const createTag = computed(() => (createProcess.value ? tagOf(createProcess.value) : ""));
+const createLen = ref<number | null>(1000);
+const createQty = ref<number | null>(1);
+const createTs = ref<string>(localIsoMinute());
+
+const computedCreateItemId = computed(() => {
+  if (!createType.value || !createLine.value || createInch.value == null || !createLen.value || !createProcess.value) return "";
+  return buildItemId(createType.value, createLine.value, Number(createInch.value), createTag.value, Number(createLen.value));
+});
+const computedCreateLotId = computed(() => {
+  if (!computedCreateItemId.value || !createTs.value) return "";
+  return buildLotId(computedCreateItemId.value, new Date(createTs.value));
+});
+
+function openCreate() {
+  showCreate.value = true;
+  if (createLen.value == null) createLen.value = 1000;
+  if (createQty.value == null) createQty.value = 1;
+  if (!createTs.value) createTs.value = localIsoMinute();
+}
+
+async function createProduction() {
+  if (!computedCreateItemId.value || !createQty.value || !createTs.value) {
+    alert("필수값(type/line/inch/process/length/qty/ts)을 입력하세요."); return;
+  }
+  const tsVal = new Date(createTs.value);
+  const payload: ProdRow = {
+    ts: isNaN(tsVal.getTime()) ? serverTimestamp() : tsVal,
+    lotId: computedCreateLotId.value,
+    itemId: computedCreateItemId.value,
+    type: createType.value,
+    line: createLine.value,
+    inch: Number(createInch.value),
+    process: createProcess.value,
+    process_tag: createTag.value,
+    length_mm: Number(createLen.value),
+    qty: Number(createQty.value),
+  };
+
+  const refNew = doc(collection(db, "productions"));
+  await setDoc(refNew, payload);
+  rows.value.unshift({ ...payload, _id: refNew.id });
+
+  // reset
+  createType.value = "";
+  createLine.value = "";
+  createInch.value = null;
+  createProcess.value = "";
+  createLen.value = 1000;
+  createQty.value = 1;
+  createTs.value = localIsoMinute();
+  showCreate.value = false;
+}
+
 /* ---------------- Edit ---------------- */
 const editingKey = ref<string | null>(null);
 const editCache = ref<ProdRow | null>(null);
 function startEdit(r: ProdRow) { editingKey.value = selKeyOf(r); editCache.value = { ...r }; }
 function cancelEdit() { editingKey.value = null; editCache.value = null; }
 
+const computedEditItemId = computed(() => {
+  const e = editCache.value;
+  if (!e) return "";
+  const tag = tagOf(e.process) || e.process_tag || "";
+  if (!e.type || !e.line || e.inch == null || e.length_mm == null || !tag) return e.itemId || "";
+  return buildItemId(e.type, e.line, Number(e.inch), tag, Number(e.length_mm));
+});
+
 async function saveEdit(orig: ProdRow) {
   if (!editCache.value) return;
   const e = editCache.value;
 
-  if (!e.itemId || !e.type || !e.line || e.inch == null || !e.process || e.length_mm == null || e.qty == null) {
+  if (!e.type || !e.line || e.inch == null || !e.process || e.length_mm == null || e.qty == null) {
     alert("필수값을 확인하세요."); return;
   }
 
@@ -200,15 +283,19 @@ async function saveEdit(orig: ProdRow) {
     if (isNaN(tsVal.getTime())) tsVal = serverTimestamp();
   }
 
+  const tagFixed = tagOf(e.process) || e.process_tag || "";
+  const newItemId = buildItemId(e.type, e.line, Number(e.inch), tagFixed, Number(e.length_mm));
+  const newLotId = buildLotId(newItemId, tsVal);
+
   const payload: ProdRow = {
     ts: tsVal,
-    lotId: e.lotId,
-    itemId: e.itemId,
+    lotId: newLotId,
+    itemId: newItemId,
     type: e.type,
     line: e.line,
     inch: Number(e.inch),
     process: e.process,
-    process_tag: PROCESS_TAGS[e.process] ?? e.process_tag ?? "",
+    process_tag: tagFixed,
     length_mm: Number(e.length_mm),
     qty: Number(e.qty),
   };
@@ -265,9 +352,9 @@ function toCSV(records: ProdRow[]) {
   };
   const lines = records.map(r => [
     formatIso(r.ts), r.lotId, r.itemId, r.type, r.line, r.inch,
-    r.process, (PROCESS_TAGS[r.process] ?? r.process_tag ?? ""),
+    r.process, (tagOf(r.process) || r.process_tag || ""),
     r.length_mm, r.qty
-  ].map(esc).join(","));
+  ].map(esc).join(",")); 
   return [headers.join(","), ...lines].join("\n");
 }
 function download(name: string, text: string) {
@@ -348,10 +435,12 @@ async function onCSVChoose(e: Event) {
       if (!isNaN(d.getTime())) tsVal = d;
     }
 
-    const tagFixed = PROCESS_TAGS[process] ?? (process_tag || "");
+    const tagFixed = tagOf(process) || (process_tag || "");
+    const fixedItemId = buildItemId(type, line, Number(inch), tagFixed, Number(length_mm));
+    const fixedLotId  = buildLotId(fixedItemId, tsVal);
 
     const payload: ProdRow = {
-      ts: tsVal, lotId, itemId, type, line,
+      ts: tsVal, lotId: fixedLotId, itemId: fixedItemId, type, line,
       inch: Number.isFinite(inch) ? inch : 0,
       process, process_tag: tagFixed,
       length_mm: Number.isFinite(length_mm) ? length_mm : 0,
@@ -396,6 +485,13 @@ const sorted = computed(() => {
   });
 });
 
+/* ---------------- Template helpers (typed handlers) ---------------- */
+function onRowCheckChange(key: string, e: Event) {
+  const target = e.target as HTMLInputElement;
+  if (target?.checked) selectedIds.value.add(key);
+  else selectedIds.value.delete(key);
+}
+
 /* ---------------- Close <details> on outside click / ESC ---------------- */
 function closeAllDetails(e?: Event) {
   const opens = document.querySelectorAll("details[open]");
@@ -433,6 +529,9 @@ onUnmounted(() => {
         <span class="badge" :title="chosenFileName">{{ chosenFileName }}</span>
 
         <button type="button" class="btn-rose" @click="deleteSelected" :disabled="!selectedRows.length">선택 삭제</button>
+        
+        <!-- 새 항목 -->
+        <button type="button" class="btn-blue" @click="openCreate">+ 새 항목</button>
         <button type="button" class="btn" @click="resetAll">필터 초기화</button>
       </div>
     </header>
@@ -453,7 +552,7 @@ onUnmounted(() => {
           <col style="width:8rem"/>
           <col style="width:6.5rem"/>   <!-- length_mm -->
           <col style="width:6.5rem"/>   <!-- qty -->
-          <col style="width:9.5rem"/>   <!-- Total header -->
+          <col style="width:10rem"/>    <!-- Total header -->
           <col style="width:8.5rem"/>   <!-- 액션 -->
         </colgroup>
 
@@ -507,8 +606,7 @@ onUnmounted(() => {
 
             <!-- 검색 -->
             <th class="px-3 py-2">
-              <input v-model="fSearch" placeholder="itemId / lotId 검색(부분)"
-                     class="w-full input"/>
+              <input v-model="fSearch" placeholder="itemId / lotId 검색(부분)" class="w-full input text-center"/>
             </th>
 
             <!-- type -->
@@ -601,7 +699,7 @@ onUnmounted(() => {
               <td class="px-3 py-2">
                 <input type="checkbox"
                   :checked="selectedIds.has(selKeyOf(r))"
-                  @change="($e)=>{ const c = ($e.target as HTMLInputElement).checked; c?selectedIds.add(selKeyOf(r)):selectedIds.delete(selKeyOf(r)) }"/>
+                  @change="onRowCheckChange(selKeyOf(r), $event)"/>
               </td>
 
               <td class="px-3 py-2 text-center">{{ fmtTsShort(r.ts) }}</td>
@@ -623,25 +721,61 @@ onUnmounted(() => {
 
             <template v-else>
               <td class="px-3 py-2"><input type="checkbox" disabled/></td>
+
+              <!-- ts -->
               <td class="px-3 py-2">
                 <input type="datetime-local"
                   :value="formatIso(editCache!.ts).slice(0,16)"
-                  @change="(e:any)=>{ const v=e.target.value; editCache!.ts = v? new Date(v): editCache!.ts }"
+                  @change="(e:any)=>{ const v=(e.target as HTMLInputElement).value; editCache!.ts = v? new Date(v): editCache!.ts }"
                   class="w-[12rem] input"/>
               </td>
-              <td class="px-3 py-2"><input v-model="editCache!.itemId" class="w-full input font-mono"/></td>
-              <td class="px-3 py-2"><input v-model="editCache!.type" list="typeList" class="w-full input"/></td>
-              <td class="px-3 py-2"><input v-model="editCache!.line" list="lineList" class="w-full input"/></td>
-              <td class="px-3 py-2"><input type="number" step="0.25" v-model.number="editCache!.inch" class="w-full input"/></td>
+
+              <!-- itemId (자동계산 read-only) -->
+               <td class="px-3 py-2 font-mono text-[12.5px] no-wrap">{{ computedEditItemId }}</td>
+              
+              <!-- type select -->
               <td class="px-3 py-2">
-                <select v-model="editCache!.process" class="w-full input">
+                <select v-model="editCache!.type" class="w-full input">
                   <option disabled value="">선택</option>
-                  <option v-for="p in PROCESS_MASTER" :key="p" :value="p">{{ p }}</option>
+                  <option v-for="t in TYPE_CODES" :key="t" :value="t">{{ t }}</option>
                 </select>
               </td>
-              <td class="px-3 py-2"><input type="number" v-model.number="editCache!.length_mm" class="w-full input"/></td>
-              <td class="px-3 py-2"><input type="number" v-model.number="editCache!.qty" class="w-full input"/></td>
+
+              <!-- line select -->
+              <td class="px-3 py-2">
+                <select v-model="editCache!.line" class="w-full input">
+                  <option disabled value="">선택</option>
+                  <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
+                </select>
+              </td>
+
+              <!-- inch number -->
+              <td class="px-3 py-2">
+                <input type="number" step="0.25" v-model.number="editCache!.inch" class="input compact-input"/>
+              </td>
+
+              <!-- process select -->
+              <td class="px-3 py-2">
+                <div class="grid grid-cols-[1fr_auto] gap-2 items-center">
+                  <select v-model="editCache!.process" class="w-full input">
+                    <option disabled value="">선택</option>
+                    <option v-for="p in PROCESS_CODES" :key="p" :value="p">{{ p }}</option>
+                  </select>                  
+                </div>
+              </td>
+
+              <!-- length -->
+              <td class="px-3 py-2">
+                <input type="number" v-model.number="editCache!.length_mm" class="input compact-input"/>
+              </td>
+
+              <!-- qty -->
+              <td class="px-3 py-2">
+                <input type="number" v-model.number="editCache!.qty" class="input compact-input"/>
+              </td>
+
               <td class="px-3 py-2 text-center">—</td>
+
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
                   <button type="button" class="btn-blue" @click="saveEdit(r)">저장</button>
@@ -653,9 +787,72 @@ onUnmounted(() => {
         </tbody>
       </table>
 
-      <!-- datalist -->
-      <datalist id="typeList"><option v-for="t in TYPE_MASTER" :key="t" :value="t" /></datalist>
-      <datalist id="lineList"><option v-for="l in LINE_MASTER" :key="l" :value="l" /></datalist>
+      <!-- datalist (원하면 다른 입력에서도 재사용 가능) -->
+      <datalist id="typeList"><option v-for="t in TYPE_CODES" :key="t" :value="t" /></datalist>
+      <datalist id="lineList"><option v-for="l in LINE_CODES" :key="l" :value="l" /></datalist>
+    </div>
+
+    <!-- Create modal -->
+    <div v-if="showCreate" class="fixed inset-0 z-[9999] bg-black/40 flex items-start justify-center p-6">
+      <div class="w-[min(780px,92vw)] max-h-[80vh] overflow-auto rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-base font-semibold">새 생산실적 추가</h3>
+          <button type="button" class="btn" @click="showCreate = false">닫기</button>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3 my-2">
+          <label class="text-sm text-gray-600">type
+            <select v-model="createType" class="mt-1 w-full input">
+              <option disabled value="">선택</option>
+              <option v-for="t in TYPE_CODES" :key="t" :value="t">{{ t }}</option>
+            </select>
+          </label>
+
+          <label class="text-sm text-gray-600">line
+            <select v-model="createLine" class="mt-1 w-full input">
+              <option disabled value="">선택</option>
+              <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
+            </select>
+          </label>
+
+          <label class="text-sm text-gray-600">inch
+            <input type="number" step="0.25" v-model.number="createInch" class="mt-1 w-full input"/>
+          </label>
+
+          <label class="text-sm text-gray-600">process
+            <select v-model="createProcess" class="mt-1 w-full input">
+              <option disabled value="">선택</option>
+              <option v-for="p in PROCESS_CODES" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </label>
+
+          <label class="text-sm text-gray-600">tag
+            <input :value="createTag" readonly class="mt-1 w-full input bg-gray-50"/>
+          </label>
+
+          <label class="text-sm text-gray-600">length(mm)
+            <input type="number" v-model.number="createLen" class="mt-1 w-full input"/>
+          </label>
+
+          <label class="text-sm text-gray-600">qty
+            <input type="number" v-model.number="createQty" min="1" class="mt-1 w-full input"/>
+          </label>
+
+          <label class="text-sm text-gray-600">ts
+            <input type="datetime-local" v-model="createTs" class="mt-1 w-full input"/>
+          </label>
+        </div>
+
+        <div class="mt-2 space-y-1 text-sm">
+          <p class="font-mono">itemId: <b>{{ computedCreateItemId || "(필수값 입력 필요)" }}</b></p>
+          <p class="font-mono">lotId: <b>{{ computedCreateLotId || "(ts/항목 입력 필요)" }}</b></p>
+        </div>
+
+        <div class="flex justify-end gap-2 mt-3">
+          <button type="button" class="btn-blue" @click="createProduction">추가</button>
+          <button type="button" class="btn" @click="showCreate = false">닫기</button>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -697,6 +894,8 @@ onUnmounted(() => {
 }
 .opt { display:flex; align-items:center; gap:.5rem; height:2rem; line-height:2rem; font-size:.875rem; }
 .ck { width:1rem; height:1rem; }
+
+/* 숨김 input (브라우저 기본 레이아웃 영향 제거) */
 .file-hidden{
   position:absolute !important;
   left:-9999px !important;
@@ -706,5 +905,9 @@ onUnmounted(() => {
   clip:rect(0 0 0 0) !important;
   white-space:nowrap !important;
   opacity:0 !important;
+}
+.compact-input {
+  width: 5rem !important;
+  text-align: center;
 }
 </style>

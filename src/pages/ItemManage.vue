@@ -5,6 +5,7 @@ import {
   collection, getDocs, orderBy, query, limit,
   doc, setDoc, getDoc, deleteDoc, serverTimestamp, writeBatch
 } from "firebase/firestore";
+import { useMasters } from "@/composables/useMasters";
 
 /* ---------------- Types ---------------- */
 type ItemRow = {
@@ -18,38 +19,33 @@ type ItemRow = {
   created_at?: any;
 };
 
-/* ---------------- Master lists (user-provided) ---------------- */
-const TYPE_MASTER = ["ST1","ST2","HD1","HD2","EL1","EL2","END","CON","PCO"];
-const LINE_MASTER = ["LIQ","VAP","BOG","30T","40T","50T","60T","80T"];
-
-/* ---------------- process -> tag map ---------------- */
-const PROCESS_TAGS: Record<string, string> = {
-  Cutting_Wire: "cw",
-  Foaming: "fo",
-  Planing: "pl",
-  Cutting_length: "cl",
-  FRP_Coating: "fc",
-  Al_Coating: "ac",
-  Cutting_Elbow: "ce",
-  Glue: "gl",
-  Sanding: "sa",
-  Packaging: "pa",
-  Shipping: "sh",
-};
+/* ---------------- Masters from DB ---------------- */
+const { types, lines, processes } = useMasters();
+// codes
+const TYPE_CODES = computed(() => (types.value || []).map(t => t.code));
+const LINE_CODES = computed(() => (lines.value || []).map(l => l.code));
+const PROCESS_CODES = computed(() => (processes.value || []).map(p => p.code));
+// process -> tag map
+const PROCESS_TAG_MAP = computed<Record<string, string>>(() => {
+  const m: Record<string, string> = {};
+  (processes.value || []).forEach((p: any) => { m[p.code] = p.tag || ""; });
+  return m;
+});
+const tagOf = (proc?: string) => (proc ? (PROCESS_TAG_MAP.value[proc] || "") : "");
 
 /* ---------------- State ---------------- */
 const rows = ref<ItemRow[]>([]);
 const loading = ref(false);
 const errorMsg = ref("");
 
-/* Filters (UI 상태) */
+/* Filters (UI 상태) — 그대로 유지(데이터에 존재하는 값 기반) */
 const fTypes = ref<string[]>([]);
 const fLines = ref<string[]>([]);
 const fTags = ref<string[]>([]);
 const fProcesses = ref<string[]>([]);
 const fInches = ref<number[]>([]);
-const fLens = ref<number[]>([]);              // length 멀티 선택
-const fCreatedSince = ref<string>("");        // created_at '이후' 단일 필터
+const fLens = ref<number[]>([]);
+const fCreatedSince = ref<string>("");
 const fSearch = ref<string>("");
 
 /* Multi-select */
@@ -120,8 +116,7 @@ function formatCreatedAt(v:any) {
   const ms = createdAtMs(v); return ms==null ? "" : new Date(ms).toISOString();
 }
 
-/* ---------- “필터 옵션을 동적으로” 생성하기 ---------- */
-/* (핵심) 특정 필드를 제외하고 현재 필터를 적용한 후, 남은 행에서 옵션을 계산 */
+/* ---------- 동적 옵션(데이터 기반) ---------- */
 type FilterField = "type"|"line"|"tag"|"process"|"inch"|"length";
 function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
   const sinceMs = fCreatedSince.value ? new Date(fCreatedSince.value).getTime() : null;
@@ -142,7 +137,6 @@ function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
   return true;
 }
 
-/* 각 필터용 동적 옵션 */
 const fTypeOpts = computed(() =>
   Array.from(new Set(rows.value.filter(r => passesExcept(r,"type")).map(r => r.type))).sort()
 );
@@ -162,19 +156,19 @@ const fLengthOpts = computed(() =>
   Array.from(new Set(rows.value.filter(r => passesExcept(r,"length")).map(r => r.length_mm))).sort((a,b)=>a-b)
 );
 
-/* (생성 모달 datalist) 입력 추천은 마스터+데이터 union 유지 */
+/* (생성/수정용 datalist: 마스터 + 데이터 union) */
 const dlTypeOptions = computed(() => {
-  const s = new Set<string>(TYPE_MASTER);
+  const s = new Set<string>(TYPE_CODES.value);
   rows.value.forEach(r => s.add(r.type));
   return Array.from(s).sort();
 });
 const dlLineOptions = computed(() => {
-  const s = new Set<string>(LINE_MASTER);
+  const s = new Set<string>(LINE_CODES.value);
   rows.value.forEach(r => s.add(r.line));
   return Array.from(s).sort();
 });
 
-/* 1차 필터(길이 포함) 후 최종 목록 */
+/* 최종 목록 */
 const filtered = computed(() => rows.value.filter(r => passesExcept(r, null)));
 
 /* 요약 텍스트 */
@@ -189,33 +183,21 @@ function resetAll() {
   fCreatedSince.value = "";
 }
 
-/* 사용 불가해진 선택값 자동 정리(prune) */
+/* 사용 불가해진 선택값 정리 */
 function pruneMulti<T>(model: T[], valid: Set<T>) {
   const next = model.filter(v => valid.has(v));
   if (next.length !== model.length) return next;
   return model;
 }
-watch([fTypeOpts], () => {
-  fTypes.value = pruneMulti(fTypes.value, new Set(fTypeOpts.value)) as string[];
-});
-watch([fLineOpts], () => {
-  fLines.value = pruneMulti(fLines.value, new Set(fLineOpts.value)) as string[];
-});
-watch([fTagOpts], () => {
-  fTags.value = pruneMulti(fTags.value, new Set(fTagOpts.value)) as string[];
-});
-watch([fProcessOpts], () => {
-  fProcesses.value = pruneMulti(fProcesses.value, new Set(fProcessOpts.value)) as string[];
-});
-watch([fInchOpts], () => {
-  fInches.value = pruneMulti(fInches.value, new Set(fInchOpts.value)) as number[];
-});
-watch([fLengthOpts], () => {
-  fLens.value = pruneMulti(fLens.value, new Set(fLengthOpts.value)) as number[];
-});
+watch([fTypeOpts], () => { fTypes.value = pruneMulti(fTypes.value, new Set(fTypeOpts.value)) as string[]; });
+watch([fLineOpts], () => { fLines.value = pruneMulti(fLines.value, new Set(fLineOpts.value)) as string[]; });
+watch([fTagOpts], () => { fTags.value = pruneMulti(fTags.value, new Set(fTagOpts.value)) as string[]; });
+watch([fProcessOpts], () => { fProcesses.value = pruneMulti(fProcesses.value, new Set(fProcessOpts.value)) as string[]; });
+watch([fInchOpts], () => { fInches.value = pruneMulti(fInches.value, new Set(fInchOpts.value)) as number[]; });
+watch([fLengthOpts], () => { fLens.value = pruneMulti(fLens.value, new Set(fLengthOpts.value)) as number[]; });
 
 /* ---------------- Create ---------------- */
-watch(createProc, (p) => { createTag.value = p ? (PROCESS_TAGS[p] ?? "") : ""; });
+watch(createProc, (p) => { createTag.value = p ? tagOf(p) : ""; });
 
 const computedCreateId = computed(() => {
   if (!createType.value || !createLine.value || createInch.value == null || !createTag.value || createLen.value == null) return "";
@@ -260,7 +242,7 @@ const computedEditId = computed(() => {
 function onEditProcessChange() {
   if (!editCache.value) return;
   const p = editCache.value.process || "";
-  editCache.value.process_tag = PROCESS_TAGS[p] ?? editCache.value.process_tag;
+  editCache.value.process_tag = tagOf(p) || editCache.value.process_tag;
 }
 async function saveEdit(orig: ItemRow) {
   if (!editCache.value) return;
@@ -327,8 +309,7 @@ function toCSV(records: ItemRow[]) {
     return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
   };
   const lines = records.map(r => [
-    r.itemId, r.type, r.line, r.inch,
-    r.process ?? "", r.process_tag, r.length_mm, formatCreatedAt(r.created_at)
+    r.itemId, r.type, r.line, r.inch, r.process ?? "", r.process_tag, r.length_mm, formatCreatedAt(r.created_at)
   ].map(esc).join(","));
   return [headers.join(","), ...lines].join("\n");
 }
@@ -382,7 +363,7 @@ async function onCSVChoose(e: Event) {
     const type=_type, line=_line;
     const inch=Number(_inch), length_mm=Number(_len);
     const process=_proc || undefined;
-    const process_tag = process ? (PROCESS_TAGS[process] ?? _tag) : _tag;
+    const process_tag = process ? (tagOf(process) || _tag) : _tag;
 
     let created:any = serverTimestamp();
     if (_created && _created.trim()) {
@@ -461,30 +442,22 @@ onUnmounted(() => {
       <div class="flex items-center gap-2">
         <span class="text-sm text-gray-600">표시: <b>{{ filtered.length }}</b> / 전체 {{ rows.length }}</span>
 
-        <button type="button"
-                class="inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 active:scale-[.98] transition"
-                @click="load" :disabled="loading">새로고침</button>
+        <button type="button" class="btn" @click="load" :disabled="loading">새로고침</button>
 
-        <button type="button"
-                class="inline-flex items-center rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 active:scale-[.98] transition disabled:opacity-50"
-                @click="exportSelectedCSV" :disabled="!selectedRows.length">CSV 내보내기(선택)</button>
+        <button type="button" class="btn-outline blue"
+                @click="exportSelectedCSV" :disabled="!selectedRows.length">
+          CSV 내보내기(선택)
+        </button>
 
-        <button type="button"
-                class="inline-flex items-center rounded-lg border border-blue-300 bg-white px-3 py-1.5 text-sm text-blue-700 hover:bg-blue-50 active:scale-[.98] transition"
-                @click="triggerCSVUpload">CSV 올리기</button>
-        <input ref="fileInput" type="file" accept=".csv,text/csv" class="hidden" @change="onCSVChoose"/>
+        <button type="button" class="btn-outline blue" @click="triggerCSVUpload">CSV 올리기</button>
+        <input ref="fileInput" type="file" accept=".csv,text/csv" class="file-hidden" @change="onCSVChoose"/>
 
-        <button type="button"
-                class="inline-flex items-center rounded-lg bg-rose-600 px-3 py-1.5 text-sm text-white shadow-sm hover:bg-rose-700 active:scale-[.98] transition disabled:opacity-50"
+        <button type="button" class="btn-rose"
                 @click="deleteSelected" :disabled="!selectedRows.length">선택 삭제</button>
 
-        <button type="button"
-                class="inline-flex items-center rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white shadow-sm hover:bg-blue-700 active:scale-[.98] transition"
-                @click="openCreate">+ 새 항목</button>
+        <button type="button" class="btn-blue" @click="openCreate">+ 새 항목</button>
 
-        <button type="button"
-                class="inline-flex items-center rounded-lg bg-gray-100 px-3 py-1.5 text-sm hover:bg-gray-200 active:scale-[.98] transition"
-                @click="resetAll">필터 초기화</button>
+        <button type="button" class="btn" @click="resetAll">필터 초기화</button>
       </div>
     </header>
 
@@ -497,71 +470,73 @@ onUnmounted(() => {
         <colgroup>
           <col style="width:3rem"/>
           <col style="width:24rem"/>
-          <col style="width:6.5rem"/>
-          <col style="width:6.5rem"/>
-          <col style="width:5rem"/>
+          <col style="width:7rem"/>
+          <col style="width:7rem"/>
+          <col style="width:5.5rem"/>
           <col style="width:7rem"/>
           <col style="width:10rem"/>
           <col style="width:9rem"/>
           <col style="width:13rem"/>
-          <col style="width:8rem"/>
+          <col style="width:8.5rem"/>
         </colgroup>
 
         <thead>
           <!-- 1줄 헤더 (정렬) -->
           <tr class="sticky top-0 z-20 bg-gray-50 h-12 select-none">
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">
+            <th class="th th-center">
               <input type="checkbox" :checked="allChecked" @change="allChecked = ($event.target as HTMLInputElement).checked"/>
             </th>
 
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('itemId')">
               itemId <span v-if="sortKey==='itemId'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('type')">
               type <span v-if="sortKey==='type'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('line')">
               line <span v-if="sortKey==='line'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('inch')">
               inch <span v-if="sortKey==='inch'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('process_tag')">
               tag <span v-if="sortKey==='process_tag'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('process')">
               process <span v-if="sortKey==='process'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('length_mm')">
               length (mm) <span v-if="sortKey==='length_mm'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+            <th class="th th-center cursor-pointer hover:bg-gray-100"
                 @click="toggleSort('created_at')">
               created_at <span v-if="sortKey==='created_at'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
 
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">액션</th>
+            <th class="th th-center">액션</th>
           </tr>
 
           <!-- 2줄: 필터 (옵션 동적) -->
           <tr class="sticky top-12 z-10 bg-white border-b">
             <th></th>
-            <th class="px-3 py-2">
+
+            <!-- itemId 검색 -->
+            <th class="filter-cell">
               <input v-model="fSearch" placeholder="itemId 검색(부분)"
-                     class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
+                     class="input w-[16rem] mx-auto block"/>
             </th>
 
             <!-- type -->
-            <th class="px-3 py-2">
-              <details class="relative">
-                <summary class="select-like">{{ fTypes.length ? fTypes.join(", ") : "전체" }}</summary>
+            <th class="filter-cell">
+              <details class="relative inline-block">
+                <summary class="select-like mx-auto">{{ fTypes.length ? fTypes.join(", ") : "전체" }}</summary>
                 <div class="dd">
                   <label v-for="v in fTypeOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fTypes" class="h-4 w-4"/> <span>{{ v }}</span>
@@ -571,9 +546,9 @@ onUnmounted(() => {
             </th>
 
             <!-- line -->
-            <th class="px-3 py-2">
-              <details class="relative">
-                <summary class="select-like">{{ fLines.length ? fLines.join(", ") : "전체" }}</summary>
+            <th class="filter-cell">
+              <details class="relative inline-block">
+                <summary class="select-like mx-auto">{{ fLines.length ? fLines.join(", ") : "전체" }}</summary>
                 <div class="dd">
                   <label v-for="v in fLineOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fLines" class="h-4 w-4"/> <span>{{ v }}</span>
@@ -583,9 +558,9 @@ onUnmounted(() => {
             </th>
 
             <!-- inch -->
-            <th class="px-3 py-2">
-              <details class="relative">
-                <summary class="select-like">{{ fInches.length ? fInches.join(", ") : "전체" }}</summary>
+            <th class="filter-cell">
+              <details class="relative inline-block">
+                <summary class="select-like mx-auto">{{ fInches.length ? fInches.join(", ") : "전체" }}</summary>
                 <div class="dd">
                   <label v-for="v in fInchOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fInches" class="h-4 w-4"/> <span>{{ v }}</span>
@@ -595,9 +570,9 @@ onUnmounted(() => {
             </th>
 
             <!-- tag -->
-            <th class="px-3 py-2">
-              <details class="relative">
-                <summary class="select-like">{{ fTags.length ? fTags.join(", ") : "전체" }}</summary>
+            <th class="filter-cell">
+              <details class="relative inline-block">
+                <summary class="select-like mx-auto">{{ fTags.length ? fTags.join(", ") : "전체" }}</summary>
                 <div class="dd">
                   <label v-for="v in fTagOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fTags" class="h-4 w-4"/> <span>{{ v }}</span>
@@ -607,9 +582,9 @@ onUnmounted(() => {
             </th>
 
             <!-- process -->
-            <th class="px-3 py-2">
-              <details class="relative">
-                <summary class="select-like">{{ fProcesses.length ? fProcesses.join(", ") : "전체" }}</summary>
+            <th class="filter-cell">
+              <details class="relative inline-block">
+                <summary class="select-like mx-auto">{{ fProcesses.length ? fProcesses.join(", ") : "전체" }}</summary>
                 <div class="dd">
                   <label v-for="v in fProcessOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fProcesses" class="h-4 w-4"/> <span>{{ v }}</span>
@@ -618,10 +593,10 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- length (mm): 멀티체크 드롭다운 -->
-            <th class="px-3 py-2">
-              <details class="relative">
-                <summary class="select-like">{{ lengthSummary }}</summary>
+            <!-- length (mm) -->
+            <th class="filter-cell">
+              <details class="relative inline-block">
+                <summary class="select-like mx-auto">{{ lengthSummary }}</summary>
                 <div class="dd">
                   <label v-for="v in fLengthOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fLens" class="h-4 w-4"/> <span>{{ v }}</span>
@@ -630,10 +605,10 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- created_at: '이후' 단일 입력 -->
-            <th class="px-3 py-2">
+            <!-- created_at: '이후' -->
+            <th class="filter-cell">
               <input type="datetime-local" v-model="fCreatedSince"
-                     class="w-[12rem] rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
+                     class="input w-[12rem] mx-auto block"/>
             </th>
 
             <th></th>
@@ -643,58 +618,80 @@ onUnmounted(() => {
         <tbody class="[&>tr:nth-child(odd)]:bg-gray-50">
           <tr v-for="r in sorted" :key="r.itemId" class="border-b hover:bg-blue-50/50">
             <template v-if="editingId !== r.itemId">
-              <td class="px-3 py-2"><input type="checkbox"
-                    :checked="selectedIds.has(r.itemId)"
-                    @change="($e)=>{ const c = ($e.target as HTMLInputElement).checked; c?selectedIds.add(r.itemId):selectedIds.delete(r.itemId) }"/></td>
-              <td class="px-3 py-2 font-mono text-[12.5px]">{{ r.itemId }}</td>
-              <td class="px-3 py-2">{{ r.type }}</td>
-              <td class="px-3 py-2">{{ r.line }}</td>
-              <td class="px-3 py-2">{{ r.inch }}</td>
-              <td class="px-3 py-2">{{ r.process_tag }}</td>
-              <td class="px-3 py-2">{{ r.process || '—' }}</td>
-              <td class="px-3 py-2">{{ r.length_mm }}</td>
-              <td class="px-3 py-2">{{ fmtCreatedShort(r.created_at) }}</td>
               <td class="px-3 py-2">
-                <div class="flex gap-2">
-                  <button type="button"
-                          class="inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 active:scale-[.98] transition"
-                          @click="startEdit(r)">수정</button>
-                  <button type="button"
-                          class="inline-flex items-center rounded-lg bg-gray-100 px-3 py-1.5 text-sm hover:bg-gray-200 active:scale-[.98] transition"
-                          @click="removeItem(r)">삭제</button>
+                <input type="checkbox"
+                  :checked="selectedIds.has(r.itemId)"
+                  @change="(ev: Event)=>{ const c = (ev.target as HTMLInputElement).checked; c?selectedIds.add(r.itemId):selectedIds.delete(r.itemId) }"/>
+              </td>
+
+              <td class="px-3 py-2 font-mono text-[12.5px]">{{ r.itemId }}</td>
+              <td class="px-3 py-2 text-center">{{ r.type }}</td>
+              <td class="px-3 py-2 text-center">{{ r.line }}</td>
+              <td class="px-3 py-2 text-center">{{ r.inch }}</td>
+              <td class="px-3 py-2 text-center">{{ r.process_tag }}</td>
+              <td class="px-3 py-2 text-center">{{ r.process || '—' }}</td>
+              <td class="px-3 py-2 text-center">{{ r.length_mm }}</td>
+              <td class="px-3 py-2 text-center">{{ fmtCreatedShort(r.created_at) }}</td>
+              <td class="px-3 py-2">
+                <div class="flex gap-2 justify-center">
+                  <button type="button" class="btn" @click="startEdit(r)">수정</button>
+                  <button type="button" class="btn" @click="removeItem(r)">삭제</button>
                 </div>
               </td>
             </template>
 
             <template v-else>
               <td class="px-3 py-2"><input type="checkbox" disabled/></td>
-              <td class="px-3 py-2 font-mono text-[12.5px]">{{ computedEditId }}</td>
+
+              <!-- itemId (computed preview) -->
+              <td class="px-3 py-2 font-mono text-[12.5px] no-wrap">{{ computedEditId }}</td>
+
+              <!-- type: select -->
               <td class="px-3 py-2">
-                <input v-model="editCache!.type" list="typeList"
-                       class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
-              </td>
-              <td class="px-3 py-2">
-                <input v-model="editCache!.line" list="lineList"
-                       class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
-              </td>
-              <td class="px-3 py-2"><input type="number" step="0.25" v-model.number="editCache!.inch" class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/></td>
-              <td class="px-3 py-2"><input :value="editCache!.process_tag" class="w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5" readonly/></td>
-              <td class="px-3 py-2">
-                <select v-model="editCache!.process" @change="onEditProcessChange" class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400">
-                  <option value="" disabled>선택</option>
-                  <option v-for="p in fProcessOpts" :key="p" :value="p">{{ p }}</option>
+                <select v-model="editCache!.type" class="input w-full">
+                  <option v-for="t in dlTypeOptions" :key="t" :value="t">{{ t }}</option>
                 </select>
               </td>
-              <td class="px-3 py-2"><input type="number" v-model.number="editCache!.length_mm" class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/></td>
-              <td class="px-3 py-2">{{ fmtCreatedShort(editCache!.created_at) }}</td>
+
+              <!-- line: select -->
               <td class="px-3 py-2">
-                <div class="flex gap-2">
-                  <button type="button"
-                          class="inline-flex items-center rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white shadow-sm hover:bg-blue-700 active:scale-[.98] transition"
-                          @click="saveEdit(r)">저장</button>
-                  <button type="button"
-                          class="inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 active:scale-[.98] transition"
-                          @click="cancelEdit">취소</button>
+                <select v-model="editCache!.line" class="input w-full">
+                  <option v-for="l in dlLineOptions" :key="l" :value="l">{{ l }}</option>
+                </select>
+              </td>
+
+              <!-- inch -->
+              <td class="px-3 py-2">
+                <input type="number" step="0.25" v-model.number="editCache!.inch" class="input compact-input"/>
+              </td>
+
+              <!-- tag 표시만 -->
+              <td class="px-3 py-2 text-center text-gray-400">—</td>
+
+              <!-- process: select (DB 마스터 기준) + tag 동기화 -->
+              <td class="px-3 py-2">
+                <div class="proc-wrap">
+                  <span class="tag-badge">{{ editCache!.process_tag }}</span>
+                  <select v-model="editCache!.process" @change="onEditProcessChange" class="input">
+                    <option value="" disabled>선택</option>
+                    <option v-for="p in PROCESS_CODES" :key="p" :value="p">{{ p }}</option>
+                  </select>
+                </div>
+              </td>
+
+              <!-- length -->
+              <td class="px-3 py-2">
+                <input type="number" v-model.number="editCache!.length_mm" class="input w-full"/>
+              </td>
+
+              <!-- created_at -->
+              <td class="px-3 py-2 text-center no-wrap">{{ fmtCreatedShort(editCache!.created_at) }}</td>
+
+              <!-- actions -->
+              <td class="px-3 py-2">
+                <div class="flex gap-2 justify-center">
+                  <button type="button" class="btn-blue" @click="saveEdit(r)">저장</button>
+                  <button type="button" class="btn" @click="cancelEdit">취소</button>
                 </div>
               </td>
             </template>
@@ -702,7 +699,7 @@ onUnmounted(() => {
         </tbody>
       </table>
 
-      <!-- datalist: 생성 모달 추천 -->
+      <!-- datalist (유지) -->
       <datalist id="typeList">
         <option v-for="t in dlTypeOptions" :key="t" :value="t" />
       </datalist>
@@ -716,54 +713,42 @@ onUnmounted(() => {
       <div class="w-[min(720px,92vw)] max-h-[80vh] overflow-auto rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-base font-semibold">새 항목 추가</h3>
-          <button type="button"
-                  class="inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 active:scale-[.98] transition"
-                  @click="showCreate = false">닫기</button>
+          <button type="button" class="btn" @click="showCreate = false">닫기</button>
         </div>
 
         <div class="grid grid-cols-2 gap-3 my-2">
           <label class="text-sm text-gray-600">type
-            <input v-model="createType" list="typeList"
-                   class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" />
+            <input v-model="createType" list="typeList" class="mt-1 input w-full" />
           </label>
           <label class="text-sm text-gray-600">line
-            <input v-model="createLine" list="lineList"
-                   class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" />
+            <input v-model="createLine" list="lineList" class="mt-1 input w-full" />
           </label>
 
           <label class="text-sm text-gray-600">inch
-            <input type="number" step="0.25" v-model.number="createInch"
-                   class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
+            <input type="number" step="0.25" v-model.number="createInch" class="mt-1 input w-full"/>
           </label>
 
           <label class="text-sm text-gray-600">process
-            <select v-model="createProc"
-                    class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400">
+            <select v-model="createProc" class="mt-1 input w-full">
               <option value="" disabled>선택</option>
-              <option v-for="p in dlTypeOptions && dlLineOptions ? Object.keys(PROCESS_TAGS) : Object.keys(PROCESS_TAGS)" :key="p" :value="p">{{ p }}</option>
+              <option v-for="p in PROCESS_CODES" :key="p" :value="p">{{ p }}</option>
             </select>
           </label>
 
           <label class="text-sm text-gray-600">tag
-            <input v-model="createTag" readonly
-                   class="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5"/>
+            <input v-model="createTag" readonly class="mt-1 input w-full bg-gray-50 border-gray-200"/>
           </label>
 
           <label class="text-sm text-gray-600">length(mm)
-            <input type="number" v-model.number="createLen"
-                   class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
+            <input type="number" v-model.number="createLen" class="mt-1 input w-full"/>
           </label>
         </div>
 
         <p class="font-mono text-sm">생성될 itemId: <b>{{ computedCreateId || "(필수값 입력 필요)" }}</b></p>
 
         <div class="flex justify-end gap-2 mt-3">
-          <button type="button"
-                  class="inline-flex items-center rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white shadow-sm hover:bg-blue-700 active:scale-[.98] transition"
-                  @click="createItem">추가</button>
-          <button type="button"
-                  class="inline-flex items-center rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm hover:bg-gray-50 active:scale-[.98] transition"
-                  @click="showCreate = false">닫기</button>
+          <button type="button" class="btn-blue" @click="createItem">추가</button>
+          <button type="button" class="btn" @click="showCreate = false">닫기</button>
         </div>
       </div>
     </div>
@@ -772,6 +757,51 @@ onUnmounted(() => {
 
 <style scoped>
 :where(button, input, select) { all: revert; font: inherit; }
+
+/* 공통 버튼 */
+.btn {
+  display:inline-flex; align-items:center;
+  border:1px solid #d1d5db; background:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
+.btn:hover { background:#f9fafb; }
+.btn:active { transform:scale(.98); }
+
+.btn-blue {
+  display:inline-flex; align-items:center;
+  border:1px solid #2563eb; background:#2563eb; color:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
+.btn-blue:hover { background:#1d4ed8; }
+
+.btn-rose {
+  display:inline-flex; align-items:center;
+  border:1px solid #e11d48; background:#e11d48; color:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
+.btn-rose:hover { background:#be123c; }
+
+.btn-outline.blue {
+  display:inline-flex; align-items:center;
+  border:1px solid #93c5fd; background:#fff; color:#1d4ed8;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
+.btn-outline.blue:hover { background:#eff6ff; }
+
+/* 헤더/필터 가운데 정렬 */
+.th { padding:.5rem .75rem; color:#374151; border-bottom:1px solid #e5e7eb; font-weight:600; }
+.th-center { text-align:center; }
+.filter-cell { padding:.5rem .75rem; text-align:center; }
+
+/* 인풋/셀렉트 */
+.input { border:1px solid #d1d5db; border-radius:.5rem; padding:.375rem .5rem; outline:none; box-sizing:border-box; }
+.input:focus { box-shadow:0 0 0 3px rgba(59,130,246,.2); border-color:#60a5fa; }
+
+/* 멀티셀렉트 드롭다운 */
 .select-like { display:inline-flex; align-items:center; height:2.25rem; border:1px solid #d1d5db; border-radius:0.5rem; padding:0 0.75rem; background:#fff; color:#374151; cursor:pointer; user-select:none; }
 .dd {
   position: absolute; left: 0; top: 100%; margin-top: 4px;
@@ -779,4 +809,33 @@ onUnmounted(() => {
   background: #fff; border: 1px solid #e5e7eb; border-radius: .75rem;
   padding: .5rem; box-shadow: 0 10px 24px rgba(0,0,0,.08); z-index: 50;
 }
+
+/* badge */
+.tag-badge {
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:.25rem .5rem; border-radius:.5rem;
+  background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size:.8rem; white-space:nowrap;
+}
+
+/* 겹침 방지 */
+.no-wrap { white-space:nowrap; }
+
+/* 파일 input 완전 숨김 */
+.file-hidden{
+  position:absolute !important;
+  left:-9999px !important;
+  width:1px !important;
+  height:1px !important;
+  overflow:hidden !important;
+  clip:rect(0 0 0 0) !important;
+  white-space:nowrap !important;
+  opacity:0 !important;
+}
+/* inch 입력칸 슬림 + 중앙정렬 */
+.compact-input { width: 6rem !important; text-align: center; }
+
+/* process 셀렉트와 tag 배지 나란히 */
+.proc-wrap { display: inline-flex; align-items: center; gap: .5rem; flex-wrap: wrap; justify-content: center; }
 </style>
