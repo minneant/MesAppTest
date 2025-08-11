@@ -148,7 +148,7 @@ import { ref, computed, onMounted } from 'vue'
 import { getFirestore, collection, addDoc, serverTimestamp, getDocs, query, where } from 'firebase/firestore'
 
 const TYPES = ['ST1', 'ST2', 'HD1', 'HD2'] as const
-const LINES = ['LIQUID', 'VAPOUR', 'BOG', '30T', '40T', '50T', '60T', '80T'] as const
+const LINES = ['LIQ', 'VAP', 'BOG', '30T', '40T', '50T', '60T', '80T'] as const
 
 const db = getFirestore()
 const stationId = ref('TAB-01')
