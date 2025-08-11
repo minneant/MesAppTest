@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { db } from "@/firebase";
 import {
   collection, getDocs, orderBy, query, limit,
@@ -36,14 +36,13 @@ const PROCESS_TAGS: Record<string, string> = {
   Packaging: "pa",
   Shipping: "sh",
 };
-const PROCESS_OPTIONS = Object.keys(PROCESS_TAGS);
 
 /* ---------------- State ---------------- */
 const rows = ref<ItemRow[]>([]);
 const loading = ref(false);
 const errorMsg = ref("");
 
-/* Filters */
+/* Filters (UI 상태) */
 const fTypes = ref<string[]>([]);
 const fLines = ref<string[]>([]);
 const fTags = ref<string[]>([]);
@@ -121,55 +120,66 @@ function formatCreatedAt(v:any) {
   const ms = createdAtMs(v); return ms==null ? "" : new Date(ms).toISOString();
 }
 
-/* Options from data (union with master lists) */
-const typeOptions = computed(() => {
+/* ---------- “필터 옵션을 동적으로” 생성하기 ---------- */
+/* (핵심) 특정 필드를 제외하고 현재 필터를 적용한 후, 남은 행에서 옵션을 계산 */
+type FilterField = "type"|"line"|"tag"|"process"|"inch"|"length";
+function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
+  const sinceMs = fCreatedSince.value ? new Date(fCreatedSince.value).getTime() : null;
+  const sTxt = lc(fSearch.value);
+
+  if (exclude !== "type"    && fTypes.value.length     && !fTypes.value.includes(r.type)) return false;
+  if (exclude !== "line"    && fLines.value.length     && !fLines.value.includes(r.line)) return false;
+  if (exclude !== "tag"     && fTags.value.length      && !fTags.value.includes(r.process_tag)) return false;
+  if (exclude !== "process" && fProcesses.value.length && !fProcesses.value.includes(r.process ?? "")) return false;
+  if (exclude !== "inch"    && fInches.value.length    && !fInches.value.includes(r.inch)) return false;
+  if (exclude !== "length"  && fLens.value.length      && !fLens.value.includes(r.length_mm)) return false;
+
+  if (sinceMs!=null) {
+    const ms = createdAtMs(r.created_at);
+    if (ms==null || ms < sinceMs) return false;
+  }
+  if (sTxt && !lc(r.itemId).includes(sTxt)) return false;
+  return true;
+}
+
+/* 각 필터용 동적 옵션 */
+const fTypeOpts = computed(() =>
+  Array.from(new Set(rows.value.filter(r => passesExcept(r,"type")).map(r => r.type))).sort()
+);
+const fLineOpts = computed(() =>
+  Array.from(new Set(rows.value.filter(r => passesExcept(r,"line")).map(r => r.line))).sort()
+);
+const fTagOpts = computed(() =>
+  Array.from(new Set(rows.value.filter(r => passesExcept(r,"tag")).map(r => r.process_tag))).sort()
+);
+const fProcessOpts = computed(() =>
+  Array.from(new Set(rows.value.filter(r => passesExcept(r,"process")).map(r => r.process).filter(Boolean) as string[])).sort()
+);
+const fInchOpts = computed(() =>
+  Array.from(new Set(rows.value.filter(r => passesExcept(r,"inch")).map(r => r.inch))).sort((a,b)=>a-b)
+);
+const fLengthOpts = computed(() =>
+  Array.from(new Set(rows.value.filter(r => passesExcept(r,"length")).map(r => r.length_mm))).sort((a,b)=>a-b)
+);
+
+/* (생성 모달 datalist) 입력 추천은 마스터+데이터 union 유지 */
+const dlTypeOptions = computed(() => {
   const s = new Set<string>(TYPE_MASTER);
   rows.value.forEach(r => s.add(r.type));
   return Array.from(s).sort();
 });
-const lineOptions = computed(() => {
+const dlLineOptions = computed(() => {
   const s = new Set<string>(LINE_MASTER);
   rows.value.forEach(r => s.add(r.line));
   return Array.from(s).sort();
 });
-const tagOptions  = computed(() => Array.from(new Set(rows.value.map(r => r.process_tag))).sort());
-const processOptions = computed(() =>
-  Array.from(new Set(rows.value.map(r => r.process).filter(Boolean) as string[]))
-    .concat(Object.keys(PROCESS_TAGS)).filter((v, i, a) => a.indexOf(v) === i).sort()
-);
-const inchOptions = computed(() => Array.from(new Set(rows.value.map(r => r.inch))).sort((a,b)=>a-b));
 
-/* 1차 필터(길이 제외) → 길이 옵션 동적 생성 */
-const preLengthFiltered = computed(() => {
-  const sinceMs = fCreatedSince.value ? new Date(fCreatedSince.value).getTime() : null;
-  const sTxt = lc(fSearch.value);
-  return rows.value.filter(r => {
-    if (fTypes.value.length     && !fTypes.value.includes(r.type)) return false;
-    if (fLines.value.length     && !fLines.value.includes(r.line)) return false;
-    if (fTags.value.length      && !fTags.value.includes(r.process_tag)) return false;
-    if (fProcesses.value.length && !fProcesses.value.includes(r.process ?? "")) return false;
-    if (fInches.value.length    && !fInches.value.includes(r.inch)) return false;
+/* 1차 필터(길이 포함) 후 최종 목록 */
+const filtered = computed(() => rows.value.filter(r => passesExcept(r, null)));
 
-    if (sinceMs!=null) {
-      const ms = createdAtMs(r.created_at);
-      if (ms==null || ms < sinceMs) return false;
-    }
-    if (sTxt && !lc(r.itemId).includes(sTxt)) return false;
-    return true;
-  });
-});
-
-/* length 옵션(동적) + 요약 텍스트 */
-const lengthOptions = computed(() =>
-  Array.from(new Set(preLengthFiltered.value.map(r => r.length_mm))).sort((a,b)=>a-b)
-);
+/* 요약 텍스트 */
 const lengthSummary = computed(() =>
   fLens.value.length ? (fLens.value.length <= 3 ? fLens.value.join(", ") : `${fLens.value.length}개 선택`) : "전체"
-);
-
-/* 최종 필터 */
-const filtered = computed(() =>
-  preLengthFiltered.value.filter(r => !fLens.value.length || fLens.value.includes(r.length_mm))
 );
 
 /* Reset */
@@ -178,6 +188,31 @@ function resetAll() {
   fSearch.value = ""; fLens.value = [];
   fCreatedSince.value = "";
 }
+
+/* 사용 불가해진 선택값 자동 정리(prune) */
+function pruneMulti<T>(model: T[], valid: Set<T>) {
+  const next = model.filter(v => valid.has(v));
+  if (next.length !== model.length) return next;
+  return model;
+}
+watch([fTypeOpts], () => {
+  fTypes.value = pruneMulti(fTypes.value, new Set(fTypeOpts.value)) as string[];
+});
+watch([fLineOpts], () => {
+  fLines.value = pruneMulti(fLines.value, new Set(fLineOpts.value)) as string[];
+});
+watch([fTagOpts], () => {
+  fTags.value = pruneMulti(fTags.value, new Set(fTagOpts.value)) as string[];
+});
+watch([fProcessOpts], () => {
+  fProcesses.value = pruneMulti(fProcesses.value, new Set(fProcessOpts.value)) as string[];
+});
+watch([fInchOpts], () => {
+  fInches.value = pruneMulti(fInches.value, new Set(fInchOpts.value)) as number[];
+});
+watch([fLengthOpts], () => {
+  fLens.value = pruneMulti(fLens.value, new Set(fLengthOpts.value)) as number[];
+});
 
 /* ---------------- Create ---------------- */
 watch(createProc, (p) => { createTag.value = p ? (PROCESS_TAGS[p] ?? "") : ""; });
@@ -188,7 +223,6 @@ const computedCreateId = computed(() => {
 });
 
 function openCreate() {
-  // 기본값 세팅: length=1000
   showCreate.value = true;
   if (createLen.value == null) createLen.value = 1000;
 }
@@ -210,8 +244,6 @@ async function createItem() {
   if (exist.exists() && !confirm("같은 itemId가 있습니다. 덮어쓸까요?")) return;
   await setDoc(ref, payload, { merge: true });
   rows.value.unshift({ ...payload, created_at: new Date() });
-
-  // 초기화
   showCreate.value = false;
   createType.value = createLine.value = "";
   createProc.value = createTag.value = "";
@@ -367,6 +399,58 @@ async function onCSVChoose(e: Event) {
   alert(`CSV 업로드 완료`);
 }
 function triggerCSVUpload(){ fileInput.value?.click(); }
+
+/* ---------------- Sort ---------------- */
+type SortKey = "itemId" | "type" | "line" | "inch" | "process_tag" | "process" | "length_mm" | "created_at";
+const sortKey = ref<SortKey>("itemId");
+const sortDir = ref<"asc" | "desc">("asc");
+
+function toggleSort(k: SortKey) {
+  if (sortKey.value === k) {
+    sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
+  } else {
+    sortKey.value = k;
+    sortDir.value = "asc";
+  }
+}
+function getSortable(r: ItemRow, k: SortKey) {
+  if (k === "created_at") {
+    const ms = createdAtMs(r.created_at);
+    return ms ?? 0;
+  }
+  return (r as any)[k] ?? "";
+}
+const sorted = computed(() => {
+  const arr = [...filtered.value];
+  const dir = sortDir.value === "asc" ? 1 : -1;
+  const k = sortKey.value;
+  return arr.sort((a, b) => {
+    const va = getSortable(a, k);
+    const vb = getSortable(b, k);
+    if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+    return String(va).localeCompare(String(vb)) * dir;
+  });
+});
+
+/* ---------------- Close <details> on outside click / ESC ---------------- */
+function closeAllDetails(e?: Event) {
+  const opens = document.querySelectorAll("details[open]");
+  opens.forEach((d:any) => {
+    if (e && e.target instanceof Node && d.contains(e.target)) return;
+    d.open = false;
+  });
+}
+function onDocClick(e: MouseEvent) { closeAllDetails(e); }
+function onEsc(e: KeyboardEvent) { if (e.key === "Escape") closeAllDetails(); }
+
+onMounted(() => {
+  document.addEventListener("click", onDocClick, true);
+  document.addEventListener("keydown", onEsc, true);
+});
+onUnmounted(() => {
+  document.removeEventListener("click", onDocClick, true);
+  document.removeEventListener("keydown", onEsc, true);
+});
 </script>
 
 <template>
@@ -424,23 +508,49 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
         </colgroup>
 
         <thead>
-          <!-- 1줄 헤더 -->
-          <tr class="sticky top-0 z-20 bg-gray-50 h-12">
+          <!-- 1줄 헤더 (정렬) -->
+          <tr class="sticky top-0 z-20 bg-gray-50 h-12 select-none">
             <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">
               <input type="checkbox" :checked="allChecked" @change="allChecked = ($event.target as HTMLInputElement).checked"/>
             </th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">itemId</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">type</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">line</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">inch</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">tag</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">process</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">length (mm)</th>
-            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">created_at</th>
+
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('itemId')">
+              itemId <span v-if="sortKey==='itemId'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('type')">
+              type <span v-if="sortKey==='type'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('line')">
+              line <span v-if="sortKey==='line'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('inch')">
+              inch <span v-if="sortKey==='inch'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('process_tag')">
+              tag <span v-if="sortKey==='process_tag'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('process')">
+              process <span v-if="sortKey==='process'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('length_mm')">
+              length (mm) <span v-if="sortKey==='length_mm'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+            <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200 cursor-pointer hover:bg-gray-100"
+                @click="toggleSort('created_at')">
+              created_at <span v-if="sortKey==='created_at'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+            </th>
+
             <th class="px-3 py-2 text-left font-semibold text-gray-700 border-b border-gray-200">액션</th>
           </tr>
 
-          <!-- 2줄: 필터 -->
+          <!-- 2줄: 필터 (옵션 동적) -->
           <tr class="sticky top-12 z-10 bg-white border-b">
             <th></th>
             <th class="px-3 py-2">
@@ -453,7 +563,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <details class="relative">
                 <summary class="select-like">{{ fTypes.length ? fTypes.join(", ") : "전체" }}</summary>
                 <div class="dd">
-                  <label v-for="v in typeOptions" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
+                  <label v-for="v in fTypeOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fTypes" class="h-4 w-4"/> <span>{{ v }}</span>
                   </label>
                 </div>
@@ -465,7 +575,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <details class="relative">
                 <summary class="select-like">{{ fLines.length ? fLines.join(", ") : "전체" }}</summary>
                 <div class="dd">
-                  <label v-for="v in lineOptions" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
+                  <label v-for="v in fLineOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fLines" class="h-4 w-4"/> <span>{{ v }}</span>
                   </label>
                 </div>
@@ -477,7 +587,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <details class="relative">
                 <summary class="select-like">{{ fInches.length ? fInches.join(", ") : "전체" }}</summary>
                 <div class="dd">
-                  <label v-for="v in inchOptions" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
+                  <label v-for="v in fInchOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fInches" class="h-4 w-4"/> <span>{{ v }}</span>
                   </label>
                 </div>
@@ -489,7 +599,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <details class="relative">
                 <summary class="select-like">{{ fTags.length ? fTags.join(", ") : "전체" }}</summary>
                 <div class="dd">
-                  <label v-for="v in tagOptions" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
+                  <label v-for="v in fTagOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fTags" class="h-4 w-4"/> <span>{{ v }}</span>
                   </label>
                 </div>
@@ -501,7 +611,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <details class="relative">
                 <summary class="select-like">{{ fProcesses.length ? fProcesses.join(", ") : "전체" }}</summary>
                 <div class="dd">
-                  <label v-for="v in processOptions" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
+                  <label v-for="v in fProcessOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fProcesses" class="h-4 w-4"/> <span>{{ v }}</span>
                   </label>
                 </div>
@@ -513,7 +623,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <details class="relative">
                 <summary class="select-like">{{ lengthSummary }}</summary>
                 <div class="dd">
-                  <label v-for="v in lengthOptions" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
+                  <label v-for="v in fLengthOpts" :key="v" class="flex items-center gap-2 h-8 leading-8 text-sm">
                     <input type="checkbox" :value="v" v-model="fLens" class="h-4 w-4"/> <span>{{ v }}</span>
                   </label>
                 </div>
@@ -531,7 +641,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
         </thead>
 
         <tbody class="[&>tr:nth-child(odd)]:bg-gray-50">
-          <tr v-for="r in filtered" :key="r.itemId" class="border-b hover:bg-blue-50/50">
+          <tr v-for="r in sorted" :key="r.itemId" class="border-b hover:bg-blue-50/50">
             <template v-if="editingId !== r.itemId">
               <td class="px-3 py-2"><input type="checkbox"
                     :checked="selectedIds.has(r.itemId)"
@@ -559,7 +669,6 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
             <template v-else>
               <td class="px-3 py-2"><input type="checkbox" disabled/></td>
               <td class="px-3 py-2 font-mono text-[12.5px]">{{ computedEditId }}</td>
-              <!-- ✅ 자유입력 + 자동완성: datalist -->
               <td class="px-3 py-2">
                 <input v-model="editCache!.type" list="typeList"
                        class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
@@ -573,7 +682,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
               <td class="px-3 py-2">
                 <select v-model="editCache!.process" @change="onEditProcessChange" class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400">
                   <option value="" disabled>선택</option>
-                  <option v-for="p in processOptions" :key="p" :value="p">{{ p }}</option>
+                  <option v-for="p in fProcessOpts" :key="p" :value="p">{{ p }}</option>
                 </select>
               </td>
               <td class="px-3 py-2"><input type="number" v-model.number="editCache!.length_mm" class="w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/></td>
@@ -593,12 +702,12 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
         </tbody>
       </table>
 
-      <!-- datalist: type/line 자동완성 소스 -->
+      <!-- datalist: 생성 모달 추천 -->
       <datalist id="typeList">
-        <option v-for="t in typeOptions" :key="t" :value="t" />
+        <option v-for="t in dlTypeOptions" :key="t" :value="t" />
       </datalist>
       <datalist id="lineList">
-        <option v-for="l in lineOptions" :key="l" :value="l" />
+        <option v-for="l in dlLineOptions" :key="l" :value="l" />
       </datalist>
     </div>
 
@@ -613,7 +722,6 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
         </div>
 
         <div class="grid grid-cols-2 gap-3 my-2">
-          <!-- ✅ 자유 입력 + 추천 목록 -->
           <label class="text-sm text-gray-600">type
             <input v-model="createType" list="typeList"
                    class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" />
@@ -632,7 +740,7 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
             <select v-model="createProc"
                     class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400">
               <option value="" disabled>선택</option>
-              <option v-for="p in processOptions" :key="p" :value="p">{{ p }}</option>
+              <option v-for="p in dlTypeOptions && dlLineOptions ? Object.keys(PROCESS_TAGS) : Object.keys(PROCESS_TAGS)" :key="p" :value="p">{{ p }}</option>
             </select>
           </label>
 
@@ -641,7 +749,6 @@ function triggerCSVUpload(){ fileInput.value?.click(); }
                    class="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5"/>
           </label>
 
-          <!-- ✅ 기본값 1000, 수정 가능 -->
           <label class="text-sm text-gray-600">length(mm)
             <input type="number" v-model.number="createLen"
                    class="mt-1 w-full rounded-lg border border-gray-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
