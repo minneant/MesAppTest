@@ -4,6 +4,7 @@ import ItemManage from "./pages/ItemManage.vue";
 import ProductionHist from "./pages/ProductionHist.vue";
 import ProduceFo from "./pages/ProduceFo.vue";
 import MastersAd from "./pages/MastersAdmin.vue";
+import AdminSeed from "./pages/AdminSeed.vue"
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -14,5 +15,6 @@ export const router = createRouter({
     { path: "/items-manage", component: ItemManage},
     { path: "/produce-fo", component: ProduceFo},
     { path: "/masters-admin", component: MastersAd},
+    { path: "/admin-seed", component: AdminSeed},
   ],
 });

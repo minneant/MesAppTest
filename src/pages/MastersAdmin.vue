@@ -5,7 +5,7 @@ import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 /* ---------------- Types ---------------- */
 type MasterEntry = { code: string; label?: string; enabled?: boolean; order?: number | null };
-type ProcessEntry = MasterEntry & { tag?: string };
+type ProcessEntry = MasterEntry & { tag?: string; uom?: "" | "EA" | "M" | "ST" };
 type Kind = "types" | "lines" | "processes";
 
 /* ---------------- State ---------------- */
@@ -36,6 +36,8 @@ onMounted(() => {
 onUnmounted(() => unsubs.forEach(u => u()));
 
 /* ---------------- Helpers ---------------- */
+const UOM_OPTIONS: Array<"" | "EA" | "M"> = ["", "EA", "M","ST"]; // ""=미지정
+
 function sortByOrder<T extends MasterEntry>(a: T, b: T) {
   const ao = a.order ?? 999999, bo = b.order ?? 999999;
   return ao !== bo ? ao - bo : (a.code || "").localeCompare(b.code || "");
@@ -53,6 +55,8 @@ function normalizeProcList(list: ProcessEntry[]) {
     code: v.code ?? "",
     label: v.label ?? v.code ?? "",
     tag: v.tag ?? "",
+    // 새 필드(uom) 기본값: 미지정("")로 둔다. (기존 문서 호환)
+    uom: (v.uom === "EA" || v.uom === "M") ? v.uom : "",
     enabled: v.enabled !== false,
     order: v.order ?? null
   })).sort(sortByOrder);
@@ -91,7 +95,7 @@ function addRow(kind: Kind) {
   } else if (kind === "lines") {
     lines.value.push({ code: "", label: "", enabled: true, order: nextOrder(lines.value) });
   } else {
-    processes.value.push({ code: "", label: "", tag: "", enabled: true, order: nextOrder(processes.value) });
+    processes.value.push({ code: "", label: "", tag: "", uom: "", enabled: true, order: nextOrder(processes.value) });
   }
 }
 function removeRow(kind: Kind, idx: number) {
@@ -119,9 +123,17 @@ function toCSV(kind: Kind): string {
     const rows = arr.map(v => [v.code, v.label ?? v.code, v.enabled !== false, v.order ?? ""].map(esc).join(","));
     return [header.join(","), ...rows].join("\n");
   } else {
-    const header = ["code","label","tag","enabled","order"];
+    // processes: uom 컬럼 추가
+    const header = ["code","label","tag","uom","enabled","order"];
     const arr = processes.value;
-    const rows = arr.map(v => [v.code, v.label ?? v.code, v.tag ?? "", v.enabled !== false, v.order ?? ""].map(esc).join(","));
+    const rows = arr.map(v => [
+      v.code,
+      v.label ?? v.code,
+      v.tag ?? "",
+      (v.uom ?? ""),
+      v.enabled !== false,
+      v.order ?? ""
+    ].map(esc).join(","));
     return [header.join(","), ...rows].join("\n");
   }
 }
@@ -168,17 +180,26 @@ async function onFileChoose(kind: Kind, e: Event) {
     if (kind === "types") types.value = normalizeList(next);
     else lines.value = normalizeList(next);
   } else {
-    const need = ["code","label","tag","enabled","order"];
+    // processes: uom 포함된 헤더
+    const need = ["code","label","tag","uom","enabled","order"];
     if (header.join(",") !== need.join(",")) {
       alert(`CSV 헤더가 올바르지 않습니다.\n필요 헤더: ${need.join(",")}`); input.value=""; return;
     }
-    const next: ProcessEntry[] = arr.map(c => ({
-      code: c[0] ?? "",
-      label: c[1] ?? c[0] ?? "",
-      tag: c[2] ?? "",
-      enabled: String(c[3] ?? "true").toLowerCase() !== "false",
-      order: c[4] ? Number(c[4]) : null
-    }));
+    const next: ProcessEntry[] = arr.map(c => {
+      const raw = (c[3] ?? "").toUpperCase();
+      const safeUom: "" | "EA" | "M" | "ST" =
+        raw === "EA" ? "EA" :
+        raw === "M"  ? "M"  :
+        raw === "ST" ? "ST" : "";
+      return {
+        code: c[0] ?? "",
+        label: c[1] ?? c[0] ?? "",
+        tag: c[2] ?? "",
+        uom: safeUom,
+        enabled: String(c[4] ?? "true").toLowerCase() !== "false",
+        order: c[5] ? Number(c[5]) : null
+      };
+    });
     processes.value = normalizeProcList(next);
   }
 }
@@ -191,7 +212,7 @@ const fileInputs = {
 };
 function triggerFile(kind: Kind){ fileInputs[kind].value?.click(); }
 
-/* ---------------- Seed (기본값 채우기) ---------------- */
+/* ---------------- Seed (기본값) ---------------- */
 const DEFAULT_TYPES: MasterEntry[] = [
   { code:"ST1", label:"ST1", enabled:true, order:10 },
   { code:"ST2", label:"ST2", enabled:true, order:20 },
@@ -204,8 +225,8 @@ const DEFAULT_TYPES: MasterEntry[] = [
   { code:"PCO", label:"PCO", enabled:true, order:90 },
 ];
 const DEFAULT_LINES: MasterEntry[] = [
-  { code:"LIQ", label:"LIQ", enabled:true, order:10 },
-  { code:"VAP", label:"VAP", enabled:true, order:20 },
+  { code:"LIQ", label:"LIQUID", enabled:true, order:10 },
+  { code:"VAP", label:"VAPOUR", enabled:true, order:20 },
   { code:"BOG", label:"BOG", enabled:true, order:30 },
   { code:"30T", label:"30T", enabled:true, order:40 },
   { code:"40T", label:"40T", enabled:true, order:50 },
@@ -214,17 +235,17 @@ const DEFAULT_LINES: MasterEntry[] = [
   { code:"80T", label:"80T", enabled:true, order:80 },
 ];
 const DEFAULT_PROCESSES: ProcessEntry[] = [
-  { code:"Cutting_Wire",  label:"Cutting_Wire",  tag:"cw", enabled:true, order:10 },
-  { code:"Foaming",       label:"Foaming",       tag:"fo", enabled:true, order:20 },
-  { code:"Planing",       label:"Planing",       tag:"pl", enabled:true, order:30 },
-  { code:"Cutting_length",label:"Cutting_length",tag:"cl", enabled:true, order:40 },
-  { code:"FRP_Coating",   label:"FRP_Coating",   tag:"fc", enabled:true, order:50 },
-  { code:"Al_Coating",    label:"Al_Coating",    tag:"ac", enabled:true, order:60 },
-  { code:"Cutting_Elbow", label:"Cutting_Elbow", tag:"ce", enabled:true, order:70 },
-  { code:"Glue",          label:"Glue",          tag:"gl", enabled:true, order:80 },
-  { code:"Sanding",       label:"Sanding",       tag:"sa", enabled:true, order:90 },
-  { code:"Packaging",     label:"Packaging",     tag:"pa", enabled:true, order:100 },
-  { code:"Shipping",      label:"Shipping",      tag:"sh", enabled:true, order:110 },
+  { code:"Cutting_Wire",  label:"Cutting_Wire",  tag:"cw", uom:"EA", enabled:true, order:10 },
+  { code:"Foaming",       label:"Foaming",       tag:"fo", uom:"EA", enabled:true, order:20 },
+  { code:"Planing",       label:"Planing",       tag:"pl", uom:"EA", enabled:true, order:30 },
+  { code:"Cutting_length",label:"Cutting_length",tag:"cl", uom:"M",  enabled:true, order:40 },
+  { code:"FRP_Coating",   label:"FRP_Coating",   tag:"fc", uom:"EA", enabled:true, order:50 },
+  { code:"Al_Coating",    label:"Al_Coating",    tag:"ac", uom:"EA", enabled:true, order:60 },
+  { code:"Cutting_Elbow", label:"Cutting_Elbow", tag:"ce", uom:"EA", enabled:true, order:70 },
+  { code:"Glue",          label:"Glue",          tag:"gl", uom:"EA", enabled:true, order:80 },
+  { code:"Sanding",       label:"Sanding",       tag:"sa", uom:"EA", enabled:true, order:90 },
+  { code:"Packaging",     label:"Packaging",     tag:"pa", uom:"M",  enabled:true, order:100 },
+  { code:"Shipping",      label:"Shipping",      tag:"sh", uom:"M",  enabled:true, order:110 },
 ];
 
 async function seedDefaults() {
@@ -327,7 +348,7 @@ async function seedDefaults() {
       </div>
     </div>
 
-    <!-- Processes -->
+    <!-- Processes (UoM 추가) -->
     <div class="card">
       <div class="card-head">
         <h3 class="card-title">Processes</h3>
@@ -344,11 +365,12 @@ async function seedDefaults() {
         <table class="tbl">
           <thead>
             <tr>
-              <th class="th th-center" style="width:14rem">code</th>
+              <th class="th th-center" style="width:12rem">code</th>
               <th class="th th-center">label</th>
-              <th class="th th-center" style="width:10rem">tag</th>
-              <th class="th th-center" style="width:7rem">enabled</th>
-              <th class="th th-center" style="width:7rem">order</th>
+              <th class="th th-center" style="width:8rem">tag</th>
+              <th class="th th-center" style="width:8rem">uom</th>
+              <th class="th th-center" style="width:6rem">enabled</th>
+              <th class="th th-center" style="width:6rem">order</th>
               <th class="th th-center" style="width:7rem">액션</th>
             </tr>
           </thead>
@@ -357,6 +379,13 @@ async function seedDefaults() {
               <td class="td"><input v-model="r.code" class="input w-full"/></td>
               <td class="td"><input v-model="r.label" class="input w-full"/></td>
               <td class="td"><input v-model="r.tag" class="input w-full"/></td>
+              <td class="td">
+                <select v-model="r.uom" class="input w-full">
+                  <option v-for="opt in UOM_OPTIONS" :key="opt" :value="opt">
+                    {{ opt || "(미지정)" }}
+                  </option>
+                </select>
+              </td>
               <td class="td td-center"><input type="checkbox" v-model="r.enabled"/></td>
               <td class="td"><input type="number" v-model.number="r.order" class="input w-full"/></td>
               <td class="td td-center">
