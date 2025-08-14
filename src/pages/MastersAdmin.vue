@@ -4,13 +4,21 @@ import { db } from "@/firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 /* ---------------- Types ---------------- */
-type MasterEntry = { code: string; label?: string; enabled?: boolean; order?: number | null };
-type ProcessEntry = MasterEntry & { tag?: string; uom?: "" | "EA" | "M" | "ST" };
+type UomType = "" | "EA" | "M" | "ST";
+type ProductLevel = 0 | 1 | 2 | 3 | 4;
+
+type BaseEntry = { code: string; label?: string; enabled?: boolean; order?: number | null };
+type TypeEntry = BaseEntry & { uom?: UomType };
+type LineEntry = BaseEntry;
+type ProcessEntry = BaseEntry & {
+  tag?: string;
+  product_level?: ProductLevel | null;
+};
 type Kind = "types" | "lines" | "processes";
 
 /* ---------------- State ---------------- */
-const types = ref<MasterEntry[]>([]);
-const lines = ref<MasterEntry[]>([]);
+const types = ref<TypeEntry[]>([]);
+const lines = ref<LineEntry[]>([]);
 const processes = ref<ProcessEntry[]>([]);
 
 const chosenFileName = ref<{[K in Kind]?: string}>({ types: "선택된 파일 없음", lines: "선택된 파일 없음", processes: "선택된 파일 없음" });
@@ -20,12 +28,12 @@ let unsubs: Array<() => void> = [];
 /* ---------------- Load (live) ---------------- */
 onMounted(() => {
   const u1 = onSnapshot(doc(db, "masters", "types"), snap => {
-    const list = (snap.data()?.list ?? []) as MasterEntry[];
-    types.value = normalizeList(list);
+    const list = (snap.data()?.list ?? []) as TypeEntry[];
+    types.value = normalizeTypeList(list);
   });
   const u2 = onSnapshot(doc(db, "masters", "lines"), snap => {
-    const list = (snap.data()?.list ?? []) as MasterEntry[];
-    lines.value = normalizeList(list);
+    const list = (snap.data()?.list ?? []) as LineEntry[];
+    lines.value = normalizeBaseList(list);
   });
   const u3 = onSnapshot(doc(db, "masters", "processes"), snap => {
     const list = (snap.data()?.list ?? []) as ProcessEntry[];
@@ -36,18 +44,43 @@ onMounted(() => {
 onUnmounted(() => unsubs.forEach(u => u()));
 
 /* ---------------- Helpers ---------------- */
-const UOM_OPTIONS: Array<"" | "EA" | "M"> = ["", "EA", "M","ST"]; // ""=미지정
+const UOM_OPTIONS: UomType[] = ["", "EA", "M", "ST"]; // ""=미지정
+const LEVEL_OPTIONS: Array<{value: ProductLevel, label: string}> = [
+  { value: 0, label: "0 출하" },
+  { value: 1, label: "1 포장된제품" },
+  { value: 2, label: "2 공정끝난제품" },
+  { value: 3, label: "3 반제품" },
+  { value: 4, label: "4 원재료" },
+];
 
-function sortByOrder<T extends MasterEntry>(a: T, b: T) {
+function sortByOrder<T extends BaseEntry>(a: T, b: T) {
   const ao = a.order ?? 999999, bo = b.order ?? 999999;
   return ao !== bo ? ao - bo : (a.code || "").localeCompare(b.code || "");
 }
-function normalizeList(list: MasterEntry[]) {
+function normalizeBaseList<T extends BaseEntry>(list: T[]) {
   return [...list].map(v => ({
     code: v.code ?? "",
     label: v.label ?? v.code ?? "",
     enabled: v.enabled !== false,
     order: v.order ?? null
+  })).sort(sortByOrder);
+}
+function coerceUom(raw: any): UomType {
+  const up = String(raw ?? "").toUpperCase();
+  return (up === "EA" || up === "M" || up === "ST") ? (up as UomType) : "";
+}
+function coerceLevel(raw: any): ProductLevel | null {
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0 && n <= 4) return n as ProductLevel;
+  return null;
+}
+function normalizeTypeList(list: TypeEntry[]) {
+  return [...list].map(v => ({
+    code: v.code ?? "",
+    label: v.label ?? v.code ?? "",
+    enabled: v.enabled !== false,
+    order: v.order ?? null,
+    uom: coerceUom(v.uom)
   })).sort(sortByOrder);
 }
 function normalizeProcList(list: ProcessEntry[]) {
@@ -55,13 +88,12 @@ function normalizeProcList(list: ProcessEntry[]) {
     code: v.code ?? "",
     label: v.label ?? v.code ?? "",
     tag: v.tag ?? "",
-    // 새 필드(uom) 기본값: 미지정("")로 둔다. (기존 문서 호환)
-    uom: (v.uom === "EA" || v.uom === "M") ? v.uom : "",
     enabled: v.enabled !== false,
-    order: v.order ?? null
+    order: v.order ?? null,
+    product_level: coerceLevel(v.product_level) ?? 3
   })).sort(sortByOrder);
 }
-function nextOrder(arr: MasterEntry[]) {
+function nextOrder(arr: BaseEntry[]) {
   const nums = arr.map(v => v.order ?? 0);
   return (nums.length ? Math.max(...nums) : 0) + 10;
 }
@@ -91,11 +123,18 @@ async function saveAll() {
 /* Add / Remove rows */
 function addRow(kind: Kind) {
   if (kind === "types") {
-    types.value.push({ code: "", label: "", enabled: true, order: nextOrder(types.value) });
+    types.value.push({ code: "", label: "", uom: "", enabled: true, order: nextOrder(types.value) });
   } else if (kind === "lines") {
     lines.value.push({ code: "", label: "", enabled: true, order: nextOrder(lines.value) });
   } else {
-    processes.value.push({ code: "", label: "", tag: "", uom: "", enabled: true, order: nextOrder(processes.value) });
+    processes.value.push({
+      code: "",
+      label: "",
+      tag: "",
+      enabled: true,
+      order: nextOrder(processes.value),
+      product_level: 3,
+    });
   }
 }
 function removeRow(kind: Kind, idx: number) {
@@ -117,22 +156,23 @@ function esc(v:any) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
 }
 function toCSV(kind: Kind): string {
-  if (kind === "types" || kind === "lines") {
+  if (kind === "types") {
+    // NEW: types에 uom 포함
+    const header = ["code","label","uom","enabled","order"];
+    const arr = types.value;
+    const rows = arr.map(v => [v.code, v.label ?? v.code, (v.uom ?? ""), v.enabled !== false, v.order ?? ""].map(esc).join(","));
+    return [header.join(","), ...rows].join("\n");
+  } else if (kind === "lines") {
     const header = ["code","label","enabled","order"];
-    const arr = (kind === "types" ? types.value : lines.value);
+    const arr = lines.value;
     const rows = arr.map(v => [v.code, v.label ?? v.code, v.enabled !== false, v.order ?? ""].map(esc).join(","));
     return [header.join(","), ...rows].join("\n");
   } else {
-    // processes: uom 컬럼 추가
-    const header = ["code","label","tag","uom","enabled","order"];
+    // NEW: processes에서 uom 제거 -> product_level만 포함
+    const header = ["code","label","tag","product_level","enabled","order"];
     const arr = processes.value;
     const rows = arr.map(v => [
-      v.code,
-      v.label ?? v.code,
-      v.tag ?? "",
-      (v.uom ?? ""),
-      v.enabled !== false,
-      v.order ?? ""
+      v.code, v.label ?? v.code, v.tag ?? "", (v.product_level ?? ""), v.enabled !== false, v.order ?? ""
     ].map(esc).join(","));
     return [header.join(","), ...rows].join("\n");
   }
@@ -166,38 +206,61 @@ async function onFileChoose(kind: Kind, e: Event) {
   const arr = parseCSV(txt).filter(r => r.length && r.some(c=>c!==""));
   const header = arr.shift()!.map(h => (h || "").trim());
 
-  if (kind === "types" || kind === "lines") {
+  if (kind === "types") {
+    // NEW: types CSV는 uom 포함(신헤더) 또는 uom 미포함(구헤더) 둘 다 허용
+    const needNew = ["code","label","uom","enabled","order"];
+    const needOld = ["code","label","enabled","order"];
+    let mode:"new"|"old";
+    if (header.join(",") === needNew.join(",")) mode = "new";
+    else if (header.join(",") === needOld.join(",")) mode = "old";
+    else { alert(`CSV 헤더가 올바르지 않습니다.\n허용 헤더:\n- ${needNew.join(",")}\n- ${needOld.join(",")}`); input.value=""; return; }
+
+    const next: TypeEntry[] = arr.map(c => ({
+      code: c[0] ?? "",
+      label: c[1] ?? c[0] ?? "",
+      uom: coerceUom(mode==="new" ? c[2] : ""),
+      enabled: String(c[mode==="new" ? 3 : 2] ?? "true").toLowerCase() !== "false",
+      order: (mode==="new" ? c[4] : c[3]) ? Number(mode==="new" ? c[4] : c[3]) : null
+    }));
+    types.value = normalizeTypeList(next);
+
+  } else if (kind === "lines") {
     const need = ["code","label","enabled","order"];
     if (header.join(",") !== need.join(",")) {
       alert(`CSV 헤더가 올바르지 않습니다.\n필요 헤더: ${need.join(",")}`); input.value=""; return;
     }
-    const next: MasterEntry[] = arr.map(c => ({
+    const next: LineEntry[] = arr.map(c => ({
       code: c[0] ?? "",
       label: c[1] ?? c[0] ?? "",
       enabled: String(c[2] ?? "true").toLowerCase() !== "false",
       order: c[3] ? Number(c[3]) : null
     }));
-    if (kind === "types") types.value = normalizeList(next);
-    else lines.value = normalizeList(next);
+    lines.value = normalizeBaseList(next);
+
   } else {
-    // processes: uom 포함된 헤더
-    const need = ["code","label","tag","uom","enabled","order"];
-    if (header.join(",") !== need.join(",")) {
-      alert(`CSV 헤더가 올바르지 않습니다.\n필요 헤더: ${need.join(",")}`); input.value=""; return;
+    // NEW: processes CSV는 (신헤더=product_level 포함) 또는 (구헤더=uom 포함) 모두 허용하되, 구헤더의 uom은 무시
+    const needNew = ["code","label","tag","product_level","enabled","order"];
+    const needOld = ["code","label","tag","uom","enabled","order"]; // 과거 포맷
+    let mode:"new"|"old";
+    if (header.join(",") === needNew.join(",")) mode = "new";
+    else if (header.join(",") === needOld.join(",")) mode = "old";
+    else {
+      alert(`CSV 헤더가 올바르지 않습니다.\n허용 헤더: \n- ${needNew.join(",")}\n- ${needOld.join(",")}`);
+      input.value=""; return;
     }
+
     const next: ProcessEntry[] = arr.map(c => {
-      const raw = (c[3] ?? "").toUpperCase();
-      const safeUom: "" | "EA" | "M" | "ST" =
-        raw === "EA" ? "EA" :
-        raw === "M"  ? "M"  :
-        raw === "ST" ? "ST" : "";
+      const enabledIdx = (mode==="new") ? 4 : 4;
+      const orderIdx   = (mode==="new") ? 5 : 5;
+      const levelIdx   = (mode==="new") ? 3 : null; // old엔 없음
+
       return {
         code: c[0] ?? "",
         label: c[1] ?? c[0] ?? "",
         tag: c[2] ?? "",
-        uom: safeUom,
-        enabled: String(c[4] ?? "true").toLowerCase() !== "false",
-        order: c[5] ? Number(c[5]) : null
+        product_level: levelIdx !== null ? (coerceLevel(c[levelIdx]) ?? 3) : 3,
+        enabled: String(c[enabledIdx] ?? "true").toLowerCase() !== "false",
+        order: c[orderIdx] ? Number(c[orderIdx]) : null
       };
     });
     processes.value = normalizeProcList(next);
@@ -213,18 +276,22 @@ const fileInputs = {
 function triggerFile(kind: Kind){ fileInputs[kind].value?.click(); }
 
 /* ---------------- Seed (기본값) ---------------- */
-const DEFAULT_TYPES: MasterEntry[] = [
-  { code:"ST1", label:"ST1", enabled:true, order:10 },
-  { code:"ST2", label:"ST2", enabled:true, order:20 },
-  { code:"HD1", label:"HD1", enabled:true, order:30 },
-  { code:"HD2", label:"HD2", enabled:true, order:40 },
-  { code:"EL1", label:"EL1", enabled:true, order:50 },
-  { code:"EL2", label:"EL2", enabled:true, order:60 },
-  { code:"END", label:"END", enabled:true, order:70 },
-  { code:"CON", label:"CON", enabled:true, order:80 },
-  { code:"PCO", label:"PCO", enabled:true, order:90 },
+/** NOTE: 타입별 uom은 추정값이니, 필요시 너 상황에 맞게 바꿔줘.
+ * 직관 기준: 직선 파이프류(M), 엘보/콘/엔드 등 형상품(EA)
+ */
+const DEFAULT_TYPES: TypeEntry[] = [
+  { code:"ST1", label:"ST1", uom:"M",  enabled:true, order:10 },
+  { code:"ST2", label:"ST2", uom:"M",  enabled:true, order:20 },
+  { code:"HD1", label:"HD1", uom:"M",  enabled:true, order:30 },
+  { code:"HD2", label:"HD2", uom:"M",  enabled:true, order:40 },
+  { code:"EL1", label:"EL1", uom:"EA", enabled:true, order:50 },
+  { code:"EL2", label:"EL2", uom:"EA", enabled:true, order:60 },
+  { code:"END", label:"END", uom:"EA", enabled:true, order:70 },
+  { code:"CON", label:"CON", uom:"EA", enabled:true, order:80 },
+  { code:"PCO", label:"PCO", uom:"EA", enabled:true, order:90 },
 ];
-const DEFAULT_LINES: MasterEntry[] = [
+
+const DEFAULT_LINES: LineEntry[] = [
   { code:"LIQ", label:"LIQUID", enabled:true, order:10 },
   { code:"VAP", label:"VAPOUR", enabled:true, order:20 },
   { code:"BOG", label:"BOG", enabled:true, order:30 },
@@ -234,18 +301,20 @@ const DEFAULT_LINES: MasterEntry[] = [
   { code:"60T", label:"60T", enabled:true, order:70 },
   { code:"80T", label:"80T", enabled:true, order:80 },
 ];
+
 const DEFAULT_PROCESSES: ProcessEntry[] = [
-  { code:"Cutting_Wire",  label:"Cutting_Wire",  tag:"cw", uom:"EA", enabled:true, order:10 },
-  { code:"Foaming",       label:"Foaming",       tag:"fo", uom:"EA", enabled:true, order:20 },
-  { code:"Planing",       label:"Planing",       tag:"pl", uom:"EA", enabled:true, order:30 },
-  { code:"Cutting_length",label:"Cutting_length",tag:"cl", uom:"M",  enabled:true, order:40 },
-  { code:"FRP_Coating",   label:"FRP_Coating",   tag:"fc", uom:"EA", enabled:true, order:50 },
-  { code:"Al_Coating",    label:"Al_Coating",    tag:"ac", uom:"EA", enabled:true, order:60 },
-  { code:"Cutting_Elbow", label:"Cutting_Elbow", tag:"ce", uom:"EA", enabled:true, order:70 },
-  { code:"Glue",          label:"Glue",          tag:"gl", uom:"EA", enabled:true, order:80 },
-  { code:"Sanding",       label:"Sanding",       tag:"sa", uom:"EA", enabled:true, order:90 },
-  { code:"Packaging",     label:"Packaging",     tag:"pa", uom:"M",  enabled:true, order:100 },
-  { code:"Shipping",      label:"Shipping",      tag:"sh", uom:"M",  enabled:true, order:110 },
+  // uom 제거, product_level만 유지
+  { code:"Cutting_Wire",   label:"Cutting_Wire",   tag:"cw", enabled:true, order:10,  product_level:3 },
+  { code:"Foaming",        label:"Foaming",        tag:"fo", enabled:true, order:20,  product_level:3 },
+  { code:"Planing",        label:"Planing",        tag:"pl", enabled:true, order:30,  product_level:3 },
+  { code:"Cutting_length", label:"Cutting_length", tag:"cl", enabled:true, order:40,  product_level:2 },
+  { code:"FRP_Coating",    label:"FRP_Coating",    tag:"fc", enabled:true, order:50,  product_level:2 },
+  { code:"Al_Coating",     label:"Al_Coating",     tag:"ac", enabled:true, order:60,  product_level:2 },
+  { code:"Cutting_Elbow",  label:"Cutting_Elbow",  tag:"ce", enabled:true, order:70,  product_level:3 },
+  { code:"Glue",           label:"Glue",           tag:"gl", enabled:true, order:80,  product_level:3 },
+  { code:"Sanding",        label:"Sanding",        tag:"sa", enabled:true, order:90,  product_level:3 },
+  { code:"Packaging",      label:"Packaging",      tag:"pa", enabled:true, order:100, product_level:1 },
+  { code:"Shipping",       label:"Shipping",       tag:"sh", enabled:true, order:110, product_level:0 },
 ];
 
 async function seedDefaults() {
@@ -270,7 +339,7 @@ async function seedDefaults() {
       </div>
     </header>
 
-    <!-- Types -->
+    <!-- Types (uom 이동) -->
     <div class="card">
       <div class="card-head">
         <h3 class="card-title">Types</h3>
@@ -287,8 +356,9 @@ async function seedDefaults() {
         <table class="tbl">
           <thead>
             <tr>
-              <th class="th th-center" style="width:14rem">code</th>
+              <th class="th th-center" style="width:12rem">code</th>
               <th class="th th-center">label</th>
+              <th class="th th-center" style="width:8rem">uom</th>
               <th class="th th-center" style="width:7rem">enabled</th>
               <th class="th th-center" style="width:7rem">order</th>
               <th class="th th-center" style="width:7rem">액션</th>
@@ -298,6 +368,11 @@ async function seedDefaults() {
             <tr v-for="(r,i) in types" :key="'t'+i" class="row">
               <td class="td"><input v-model="r.code" class="input w-full"/></td>
               <td class="td"><input v-model="r.label" class="input w-full"/></td>
+              <td class="td">
+                <select v-model="r.uom" class="input w-full">
+                  <option v-for="opt in UOM_OPTIONS" :key="opt" :value="opt">{{ opt || "(미지정)" }}</option>
+                </select>
+              </td>
               <td class="td td-center"><input type="checkbox" v-model="r.enabled"/></td>
               <td class="td"><input type="number" v-model.number="r.order" class="input w-full"/></td>
               <td class="td td-center">
@@ -348,7 +423,7 @@ async function seedDefaults() {
       </div>
     </div>
 
-    <!-- Processes (UoM 추가) -->
+    <!-- Processes (uom 제거, product_level 유지) -->
     <div class="card">
       <div class="card-head">
         <h3 class="card-title">Processes</h3>
@@ -365,10 +440,10 @@ async function seedDefaults() {
         <table class="tbl">
           <thead>
             <tr>
-              <th class="th th-center" style="width:12rem">code</th>
+              <th class="th th-center" style="width:11rem">code</th>
               <th class="th th-center">label</th>
-              <th class="th th-center" style="width:8rem">tag</th>
-              <th class="th th-center" style="width:8rem">uom</th>
+              <th class="th th-center" style="width:7rem">tag</th>
+              <th class="th th-center" style="width:10rem">product_level</th>
               <th class="th th-center" style="width:6rem">enabled</th>
               <th class="th th-center" style="width:6rem">order</th>
               <th class="th th-center" style="width:7rem">액션</th>
@@ -380,10 +455,8 @@ async function seedDefaults() {
               <td class="td"><input v-model="r.label" class="input w-full"/></td>
               <td class="td"><input v-model="r.tag" class="input w-full"/></td>
               <td class="td">
-                <select v-model="r.uom" class="input w-full">
-                  <option v-for="opt in UOM_OPTIONS" :key="opt" :value="opt">
-                    {{ opt || "(미지정)" }}
-                  </option>
+                <select v-model.number="r.product_level" class="input w-full">
+                  <option v-for="lv in LEVEL_OPTIONS" :key="lv.value" :value="lv.value">{{ lv.label }}</option>
                 </select>
               </td>
               <td class="td td-center"><input type="checkbox" v-model="r.enabled"/></td>

@@ -4,7 +4,7 @@
     <router-link to="/produce-fo">실적-발포공정</router-link>
     <router-link to="/bulk-items">아이템 대량생성</router-link>
     <router-link to="/items-manage">아이템 관리</router-link>
-    <router-link to="/masters-admin">마스터스 관리</router-link>
+    <router-link to="/tools/masters-admin">마스터스 관리</router-link>
   </nav>
   <router-view />
 </template>

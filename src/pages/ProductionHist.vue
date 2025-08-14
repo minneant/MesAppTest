@@ -20,6 +20,7 @@ type ProdRow = {
   process_tag?: string; // CSV/DB만
   length_mm: number;
   qty: number;
+  isProduction?: boolean; // ✅ 추가: 생산/소진 구분
 };
 
 /* ---------------- Masters (from DB) ---------------- */
@@ -76,6 +77,10 @@ const rows = ref<ProdRow[]>([]);
 const loading = ref(false);
 const errorMsg = ref("");
 
+/* 표시 모드(기본: 생산만) ✅ */
+type Mode = 'prod'|'cons'|'both';
+const mode = ref<Mode>('prod');
+
 /* Filters */
 const fTypes = ref<string[]>([]);
 const fLines = ref<string[]>([]);
@@ -124,7 +129,15 @@ async function load() {
 
 /* ---------- 동적 옵션 생성을 위한 필터 ---------- */
 type FilterField = "type"|"line"|"process"|"inch"|"length_mm"|"qty";
+function isProd(r: ProdRow) {
+  // 과거 문서에 isProduction이 없을 수 있음 → 생산으로 취급
+  return r.isProduction !== false;
+}
 function passesExcept(r: ProdRow, exclude: FilterField | null): boolean {
+  // ✅ 모드 필터
+  if (mode.value === 'prod' && !isProd(r)) return false;
+  if (mode.value === 'cons' && isProd(r)) return false;
+
   const sTxt = lc(fSearch.value);
 
   // 날짜 범위(일 단위, inclusive)
@@ -236,6 +249,7 @@ async function createProduction() {
     process_tag: createTag.value,
     length_mm: Number(createLen.value),
     qty: Number(createQty.value),
+    isProduction: true, // ✅ 새로 추가하는 것은 생산으로 저장
   };
 
   const refNew = doc(collection(db, "productions"));
@@ -298,6 +312,7 @@ async function saveEdit(orig: ProdRow) {
     process_tag: tagFixed,
     length_mm: Number(e.length_mm),
     qty: Number(e.qty),
+    isProduction: e.isProduction !== false, // ✅ 기존 값 유지(없으면 true로)
   };
 
   if (orig._id) {
@@ -395,10 +410,10 @@ async function onCSVChoose(e: Event) {
 
   const needFull = ["ts","lotId","itemId","type","line","inch","process","process_tag","length_mm","qty"];
   const needLite = ["ts","lotId","itemId","type","line","inch","process","length_mm","qty"];
-  const mode = header.join(",") === needFull.join(",") ? "full"
+  const modeCsv = header.join(",") === needFull.join(",") ? "full"
             : header.join(",") === needLite.join(",") ? "lite" : "";
 
-  if (!mode) {
+  if (!modeCsv) {
     alert("CSV 헤더가 올바르지 않습니다.\n허용 헤더:\n" + needFull.join(",") + "\n또는\n" + needLite.join(","));
     input.value=""; chosenFileName.value="선택된 파일 없음"; return;
   }
@@ -418,7 +433,7 @@ async function onCSVChoose(e: Event) {
   for (const c of arr) {
     let tsStr, lotId, itemId, type, line, inchStr, process, process_tag, lengthStr, qtyStr;
 
-    if (mode === "full") {
+    if (modeCsv === "full") {
       [tsStr,lotId,itemId,type,line,inchStr,process,process_tag,lengthStr,qtyStr] = c;
     } else {
       [tsStr,lotId,itemId,type,line,inchStr,process,lengthStr,qtyStr] = c;
@@ -445,6 +460,8 @@ async function onCSVChoose(e: Event) {
       process, process_tag: tagFixed,
       length_mm: Number.isFinite(length_mm) ? length_mm : 0,
       qty: Number.isFinite(qty) ? qty : 0,
+      // CSV에 isProduction 컬럼이 없으므로 보존 불가 → 기본 생산으로 간주
+      isProduction: true,
     };
 
     buf.push(payload);
@@ -517,8 +534,18 @@ onUnmounted(() => {
     <!-- Top bar -->
     <header class="sticky top-0 z-30 bg-white/90 backdrop-blur pb-2 flex items-center justify-between">
       <h2 class="text-lg font-semibold">Production History</h2>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center flex-wrap gap-2">
         <span class="text-sm text-gray-600">표시: <b>{{ filtered.length }}</b> / 전체 {{ rows.length }}</span>
+
+        <!-- ✅ 모드 선택 드롭다운 -->
+        <label class="flex items-center gap-1 text-sm">
+          <span class="text-gray-600">보기</span>
+          <select v-model="mode" class="input" style="height:2.25rem">
+            <option value="prod">생산만</option>
+            <option value="cons">소진만</option>
+            <option value="both">둘 다</option>
+          </select>
+        </label>
 
         <button type="button" class="btn" @click="load" :disabled="loading">새로고침</button>
         <button type="button" class="btn-outline blue" @click="exportSelectedCSV" :disabled="!selectedRows.length">CSV 내보내기(선택)</button>
@@ -696,7 +723,13 @@ onUnmounted(() => {
         </thead>
 
         <tbody class="[&>tr:nth-child(odd)]:bg-gray-50">
-          <tr v-for="r in sorted" :key="selKeyOf(r)" class="border-b hover:bg-blue-50/50">
+            <!-- 소진행은 tomato 색상 -->
+            <tr
+              v-for="r in sorted"
+              :key="selKeyOf(r)"
+              class="border-b hover:bg-blue-50/50"
+              :style="!isProd(r) ? { color: 'tomato' } : undefined"
+            >
             <template v-if="editingKey !== selKeyOf(r)">
               <td class="px-3 py-2">
                 <input type="checkbox"
@@ -786,7 +819,7 @@ onUnmounted(() => {
         </tbody>
       </table>
 
-      <!-- datalist (원하면 다른 입력에서도 재사용 가능) -->
+      <!-- datalist -->
       <datalist id="typeList"><option v-for="t in TYPE_CODES" :key="t" :value="t" /></datalist>
       <datalist id="lineList"><option v-for="l in LINE_CODES" :key="l" :value="l" /></datalist>
     </div>
@@ -894,7 +927,7 @@ onUnmounted(() => {
 .opt { display:flex; align-items:center; gap:.5rem; height:2rem; line-height:2rem; font-size:.875rem; }
 .ck { width:1rem; height:1rem; }
 
-/* 숨김 input (브라우저 기본 레이아웃 영향 제거) */
+/* 숨김 input */
 .file-hidden{
   position:absolute !important;
   left:-9999px !important;

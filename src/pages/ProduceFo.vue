@@ -16,7 +16,7 @@
         <span class="text-sm text-gray-600">Line</span>
         <select v-model="form.line" @change="refreshInches"
                 class="px-3 py-2 border rounded-lg bg-white hover:bg-gray-50">
-          <option v-for="l in LINES" :key="l" :value="l">{{ l }}</option>
+          <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
         </select>
       </div>
 
@@ -34,7 +34,6 @@
         <div class="text-sm text-gray-500" v-if="loadingInches">불러오는 중…</div>
       </div>
 
-      <!-- 한 줄 5개(반응형) - 예전 스타일 -->
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
         <button
           v-for="inch in inchOptions"
@@ -60,7 +59,7 @@
       </div>
     </div>
 
-    <!-- List (예전 스타일 래퍼) -->
+    <!-- List -->
     <div>
       <h2 class="text-lg font-medium mb-3">List</h2>
       <div class="overflow-x-auto border rounded-md bg-white shadow p-2">
@@ -87,7 +86,7 @@
               <td class="px-3 py-2">
                 <select v-model="row.line" @change="syncItemId(row)"
                         class="px-2 py-1 border rounded bg-white">
-                  <option v-for="l in LINES" :key="l" :value="l">{{ l }}</option>
+                  <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
                 </select>
               </td>
               <td class="px-3 py-2">
@@ -118,7 +117,7 @@
       </div>
     </div>
 
-    <!-- Actions (지금 잘되는 스타일 유지) -->
+    <!-- Actions -->
     <div class="flex items-center justify-center gap-3">
       <button
         :disabled="!canUpload || uploading"
@@ -144,16 +143,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { getFirestore, collection, addDoc, serverTimestamp, getDocs, query, where } from 'firebase/firestore'
+import { ref, computed, onMounted, watch } from 'vue'
+import { getFirestore, collection, addDoc, serverTimestamp, getDocs, query, where, doc, setDoc, getDoc } from 'firebase/firestore'
 
+/** ───── 하드코딩 설정 ───── **/
 const TYPES = ['ST1', 'ST2', 'HD1', 'HD2'] as const
-const LINES = ['LIQ', 'VAP', 'BOG', '30T', '40T', '50T', '60T', '80T'] as const
+// 라인은 필요시 마스터로 바꿔도 되지만 지금은 간단히 하드코딩
+const LINE_CODES = ['LIQUID', 'VAPOUR', 'BOG', '30T', '40T', '50T', '60T', '80T'] as const
+
+// fo 화면 고정 상수
+const FO_PROCESS_TAG  = 'fo'
+const FO_PROCESS_CODE = 'Foaming'
+const FO_PRODUCT_LEVEL = 3
+const FIXED_UOM = 'EA' as const
 
 const db = getFirestore()
 const stationId = ref('TAB-01')
 
-const form = ref({ type: TYPES[0], line: LINES[0] })
+// 기본 line은 'LIQUID'
+const form = ref<{type: typeof TYPES[number]; line: typeof LINE_CODES[number]}>({
+  type: TYPES[0],
+  line: 'LIQUID'
+})
 
 type Row = {
   uid: string
@@ -174,10 +185,16 @@ function shortLine(line: string) {
   if (line === 'VAPOUR') return 'VAP'
   return line
 }
-function formatInch(v: number) { return Number.isInteger(v) ? String(v) : String(v) }
-const makeItemId = (type: string, line: string, inch: number, length_mm: number) =>
-  `${type}_${shortLine(line)}_${formatInch(inch)}_fo_L${length_mm}`
-
+function inchToStr(n:number) {
+  if (Number.isInteger(n)) return String(n)
+  return String(n).replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.0+$/,'')
+}
+function formatInch(v: number) { return inchToStr(v) }
+const makeItemId = (type: string, line: string, inch: number, length_mm: number) => {
+  const inchStr = inchToStr(inch)
+  const base = `${type}_${shortLine(line)}_${inchStr}_${FO_PROCESS_TAG}`
+  return (length_mm > 0 && length_mm !== 1000) ? `${base}_${length_mm}` : base
+}
 function yymmdd(d = new Date()) {
   const yy = String(d.getFullYear() % 100).padStart(2,'0')
   const mm = String(d.getMonth()+1).padStart(2,'0')
@@ -187,13 +204,14 @@ function yymmdd(d = new Date()) {
 
 const canUpload = computed(() => !!stationId.value && rows.value.length > 0)
 
-/** items에서 인치 로드 */
+/** items에서 인치 로드 (process_tag=fo, type, line) */
 async function refreshInches() {
+  if (!form.value.type || !form.value.line) return
   loadingInches.value = true
   try {
     const qRef = query(
       collection(db, 'items'),
-      where('process_tag', '==', 'fo'),
+      where('process_tag', '==', FO_PROCESS_TAG),
       where('type', '==', form.value.type),
       where('line', '==', shortLine(form.value.line))
     )
@@ -207,7 +225,10 @@ async function refreshInches() {
     inchOptions.value = Array.from(set).sort((a,b)=>a-b)
   } finally { loadingInches.value = false }
 }
+
+// 초기 진입 & 선택값 변경 시 재조회
 onMounted(refreshInches)
+watch(() => [form.value.type, form.value.line], refreshInches, { deep: true })
 
 /** 현재 선택(type/line) 기준 인치별 총 수량(모든 length 포함) */
 function inchCount(inch: number) {
@@ -216,11 +237,10 @@ function inchCount(inch: number) {
     .reduce((sum, r) => sum + (Number(r.qty) || 0), 0)
 }
 
-/** 인치 버튼 클래스/스타일 (예전 스타일: 단계별 불투명도 + 채움) */
+/** 인치 버튼 스타일 */
 function inchButtonClass(inch: number) {
   const c = inchCount(inch)
-  const base = 'relative rounded-xl py-4 text-lg font-medium border-2 ' +
-               'transition hover:scale-105 active:scale-95'
+  const base = 'relative rounded-xl py-4 text-lg font-medium border-2 transition hover:scale-105 active:scale-95'
   return c > 0
     ? `${base} bg-green-500 text-white border-green-600 shadow-sm`
     : `${base} bg-white text-gray-800 border-gray-300 hover:bg-emerald-50`
@@ -228,7 +248,7 @@ function inchButtonClass(inch: number) {
 function inchButtonStyle(inch: number) {
   const c = inchCount(inch)
   if (c <= 0) return {}
-  const op = Math.min(1, 0.35 + c * 0.15) // 클릭할수록 진하게
+  const op = Math.min(1, 0.35 + c * 0.15)
   return { opacity: String(op) }
 }
 
@@ -260,29 +280,60 @@ function syncItemId(row: Row) { row.itemId = makeItemId(row.type, row.line, row.
 function remove(i: number) { rows.value.splice(i, 1) }
 function clearAll() { rows.value = [] }
 
-/** 업로드 */
+/** 업로드: productions 기록 + items upsert(하드코딩 메타 포함) */
 const uploading = ref(false)
 async function upload() {
   if (!canUpload.value || uploading.value) return
   uploading.value = true
   try {
-    const colRef = collection(db, 'productions')
+    const prodCol = collection(db, 'productions')
     const tsNow = serverTimestamp()
     const today = yymmdd()
+
+    // 1) items upsert (없으면 생성, 있으면 보정)
+    await Promise.all(rows.value.map(async (r) => {
+      const itemRef = doc(db, 'items', r.itemId)
+      const snap = await getDoc(itemRef)
+
+      const base = {
+        itemId: r.itemId,
+        type: r.type,
+        line: shortLine(r.line),       // DB에는 축약형 사용
+        inch: inchToStr(r.inch),       // DB에는 문자열
+        length_mm: r.length_mm,
+        process_tag: FO_PROCESS_TAG,   // 하드코딩
+        process: FO_PROCESS_CODE,      // 하드코딩
+        product_level: FO_PRODUCT_LEVEL, // 하드코딩(반제품=3)
+        uom: FIXED_UOM,                // 하드코딩 'EA'
+        active: true,
+        updated_at: tsNow,
+      }
+
+      if (snap.exists()) {
+        await setDoc(itemRef, base, { merge: true }) // created_at 보존
+      } else {
+        await setDoc(itemRef, { ...base, created_at: tsNow }, { merge: true })
+      }
+    }))
+
+    // 2) productions 기록
     const payloads = rows.value.map(r => ({
       ts: tsNow,
       lotId: `${r.itemId}_${today}`,
       itemId: r.itemId,
-      process: 'Foaming',
-      process_tag: 'fo',
+      process: FO_PROCESS_CODE,
+      process_tag: FO_PROCESS_TAG,
       type: r.type,
-      line: r.line,
-      inch: r.inch,
+      line: shortLine(r.line),  // 기록도 축약형으로 통일해도 OK
+      inch: r.inch,             // productions엔 number로
       length_mm: r.length_mm,
       qty: r.qty,
-      stationId: stationId.value
+      stationId: stationId.value,
+      uom: FIXED_UOM,           // 'EA'
+      isProduction: true
     }))
-    await Promise.all(payloads.map(p => addDoc(colRef, p)))
+    await Promise.all(payloads.map(p => addDoc(prodCol, p)))
+
     clearAll()
     alert('업로드 완료!')
   } finally { uploading.value = false }

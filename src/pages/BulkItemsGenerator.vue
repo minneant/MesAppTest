@@ -1,82 +1,49 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, watch } from "vue";
 import { db } from "@/firebase";
-import { doc, onSnapshot, writeBatch, serverTimestamp } from "firebase/firestore";
+import { doc, writeBatch, serverTimestamp } from "firebase/firestore";
 import { useMasters } from "@/composables/useMasters";
 
 /* ---------------- Masters (DB) ---------------- */
-const { types, processes } = useMasters(); // [{code,label?}], [{code,label?, tag}]
+// types: [{ code, label?, uom, enabled, order }]
+// processes: [{ code, label?, tag, enabled, order, product_level }]
+const { types, processes } = useMasters();
+
+/* 맵/옵션 */
 const TYPE_CODES = computed(() => (types.value || []).map(t => t.code));
+const TYPE_MAP = computed(() => {
+  const m: Record<string, { code:string; uom?: string }> = {};
+  (types.value || []).forEach(t => { m[t.code] = { code: t.code, uom: (t as any).uom }; });
+  return m;
+});
 const PROC_OPTS = computed(() =>
   (processes.value || [])
-    .map(p => ({ name: p.code, tag: (p as any).tag ?? "" }))
-    .filter(p => p.tag)
+    .map(p => ({ name: p.code, tag: (p as any).tag ?? "", product_level: (p as any).product_level }))
+    .filter(p => p.tag) // tag 없는 건 제외
 );
 
-/* ---------------- Matrix (DB 우선, 없으면 기본값) ---------------- */
-type Matrix = Record<string, Record<string, boolean>>;
+/* ---------------- 사용자 파라미터 ---------------- */
+/** 콤마로 라인/인치/길이 입력 */
+const LINES   = ref("LIQ,VAP,BOG");
+const INCHES  = ref("0.5,0.75,1,1.25,1.5,2,2.5");
+/** 길이: 비워도 됨(내부적으로 [0]으로 간주) */
+const LENGTHS = ref("1000");
 
-const defaultMatrix: Matrix = {
-  ST1: { cw:true, fo:true, pl:true, cl:false, fc:false, fm:false, ac:true,  ce:false, gl:false, sa:true,  pa:false, sh:false },
-  ST2: { cw:true, fo:true, pl:true, cl:false, fc:true,  fm:false, ac:false, ce:false, gl:false, sa:true,  pa:false, sh:false },
-  HD1: { cw:true, fo:true, pl:true, cl:true,  fc:false, fm:false, ac:true,  ce:false, gl:false, sa:true,  pa:false, sh:false },
-  HD2: { cw:true, fo:true, pl:true, cl:true,  fc:true,  fm:false, ac:false, ce:false, gl:false, sa:true,  pa:false, sh:false },
-  EL1: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:true,  gl:true,  sa:false, pa:false, sh:false },
-  EL2: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:true,  gl:true,  sa:false, pa:false, sh:false },
-  END: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:true,  ac:false, ce:false, gl:false, sa:true,  pa:false, sh:false },
-  CON: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:true,  ac:false, ce:false, gl:false, sa:true,  pa:false, sh:false },
-  PCO: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:true,  ac:false, ce:false, gl:false, sa:true,  pa:false, sh:false },
-  STM: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:false, gl:false, sa:false, pa:true,  sh:true  },
-  HDS: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:false, gl:false, sa:false, pa:true,  sh:true  },
-  ELS: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:false, gl:false, sa:false, pa:true,  sh:true  },
-  ENS: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:false, gl:false, sa:false, pa:true,  sh:true  },
-  COS: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:false, gl:false, sa:false, pa:true,  sh:true  },
-  PCS: { cw:false,fo:false,pl:false,cl:false, fc:false, fm:false, ac:false, ce:false, gl:false, sa:false, pa:true,  sh:true  },
-};
-const matrix = ref<Matrix>({ ...defaultMatrix });
-let unsubMatrix: (() => void) | null = null;
-
-onMounted(() => {
-  unsubMatrix = onSnapshot(doc(db, "masters", "process_matrix"), snap => {
-    const m = (snap.data() || {}) as Matrix;
-    if (m && Object.keys(m).length) matrix.value = m;
-  });
-});
-onUnmounted(() => { unsubMatrix?.(); });
-
-/* ---------------- 타입별 기본 길이 (DB 우선) ---------------- */
-const typeDefaults = ref<Record<string, number>>({
-  ST1:1000, ST2:1000, HD1:1000, HD2:1000, EL1:90, EL2:90,
-  END:1, CON:1, PCO:1, STM:1, HDS:1, ELS:1, ENS:1, COS:1, PCS:1,
-});
-let unsubTypeDefaults: (() => void) | null = null;
-onMounted(() => {
-  unsubTypeDefaults = onSnapshot(doc(db, "masters", "type_defaults"), snap => {
-    const d = (snap.data() || {}) as Record<string, number>;
-    if (d && Object.keys(d).length) typeDefaults.value = { ...typeDefaults.value, ...d };
-  });
-});
-onUnmounted(() => { unsubTypeDefaults?.(); });
-
-/* ---------------- 파라미터 ---------------- */
-const LINES = ref("LIQ,VAP,BOG");
-const INCHES = ref("0.5,0.75,1,1.25,1.5,2,2.5");
-/** Fallback 길이 입력(콤마 가능) */
-const FALLBACKS = ref("1000");
-
-/** 선택된 타입/공정 토글 */
+/** 선택 타입/공정 */
 const selectedTypes = ref<string[]>([]);
 const selectedProcTags = ref<string[]>([]);
 
-/* 마스터 로드 시 초기 선택값 지정 */
+/* 초기 선택값 */
 watch(TYPE_CODES, (list) => {
   if (!selectedTypes.value.length && list.length) {
     selectedTypes.value = list.slice(0, Math.min(2, list.length));
   }
 }, { immediate: true });
+
 watch(PROC_OPTS, (list) => {
   if (!selectedProcTags.value.length && list.length) {
-    selectedProcTags.value = list.map(p => p.tag); // 디폴트 전체 선택
+    // 공정은 기본 전체 선택
+    selectedProcTags.value = list.map(p => p.tag);
   }
 }, { immediate: true });
 
@@ -85,22 +52,39 @@ const split = (s:string)=> s.split(",").map(x=>x.trim()).filter(Boolean);
 const splitNum = (s:string)=> split(s).map(Number).filter(n=>!Number.isNaN(n));
 
 const linesArr  = computed(()=> split(LINES.value));
-const inchesArr = computed(()=> splitNum(INCHES.value));
-/** fallback 길이 목록(없으면 [1000]) */
-const fallbackLens = computed<number[]>(() => {
-  const arr = splitNum(FALLBACKS.value);
-  return arr.length ? arr : [1000];
+const inchesNum = computed(()=> splitNum(INCHES.value));
+/** 길이 입력이 비면 [0]으로 대체하여 '길이 없음' 의미 부여 */
+const lengthsArr = computed(()=>{
+  const arr = splitNum(LENGTHS.value);
+  return arr.length ? arr : [0];
 });
 
-function getLens(type:string): number[] {
-  const d = typeDefaults.value[type];
-  return (typeof d === "number" && !Number.isNaN(d)) ? [d] : fallbackLens.value;
-}
-function buildItemId(type:string,line:string,inch:number,tag:string,lengthMm:number) {
-  return `${type}_${line}_${inch}_${tag}_L${lengthMm}`;
+/** inch 숫자를 itemId/DB용 문자열로 안정 변환 */
+function inchToStr(n:number) {
+  // 소수점 불필요한 2.0 → "2" 정규화
+  if (Number.isInteger(n)) return String(n);
+  // 불필요한 0 제거
+  return String(n).replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.0+$/,'');
 }
 
-/* 선택된 공정(칩) + 매트릭스 함께 반영 */
+/** itemId 생성 규칙 */
+function buildItemId(
+  type:string,
+  line:string,
+  inchNum:number,
+  tag:string,
+  lengthMm:number
+) {
+  const inch = inchToStr(inchNum);
+  let id = `${type}_${line}_${inch}_${tag}`;
+  // length_mm가 비었거나(=0) 또는 1000이 아닌 경우에만 suffix 부여
+  if (lengthMm > 0 && lengthMm !== 1000) {
+    id += `_${lengthMm}`;
+  }
+  return id;
+}
+
+/** 선택된 공정 목록 */
 const activeProcesses = computed(() =>
   PROC_OPTS.value.filter(p => selectedProcTags.value.includes(p.tag))
 );
@@ -109,12 +93,10 @@ const activeProcesses = computed(() =>
 const preview = computed(()=>{
   const out:string[] = [];
   for (const type of selectedTypes.value) {
-    const lens = getLens(type);
     for (const p of activeProcesses.value) {
-      if (!matrix.value[type]?.[p.tag]) continue;
       for (const line of linesArr.value) {
-        for (const inch of inchesArr.value) {
-          for (const L of lens) {
+        for (const inch of inchesNum.value) {
+          for (const L of lengthsArr.value) {
             out.push(buildItemId(type,line,inch,p.tag,L));
             if (out.length >= 12) return out;
           }
@@ -125,15 +107,13 @@ const preview = computed(()=>{
   return out;
 });
 
-const expectedCount = computed(()=>{
-  let total = 0;
-  for (const t of selectedTypes.value) {
-    const lens = getLens(t).length;
-    const procCnt = activeProcesses.value.filter(p => matrix.value[t]?.[p.tag]).length;
-    total += procCnt * linesArr.value.length * inchesArr.value.length * lens;
-  }
-  return total;
-});
+const expectedCount = computed(()=>(
+  selectedTypes.value.length *
+  activeProcesses.value.length *
+  linesArr.value.length *
+  inchesNum.value.length *
+  lengthsArr.value.length
+));
 
 /* ---------------- 액션 ---------------- */
 function toggleAllTypes(on:boolean) {
@@ -147,36 +127,53 @@ async function upload(){
   if (!selectedTypes.value.length) { alert("타입을 선택하세요."); return; }
   if (!selectedProcTags.value.length) { alert("공정을 선택하세요."); return; }
   if (!linesArr.value.length) { alert("Lines를 확인하세요."); return; }
-  if (!inchesArr.value.length) { alert("Inches를 확인하세요."); return; }
+  if (!inchesNum.value.length) { alert("Inches를 확인하세요."); return; }
+  // LENGTHS는 비워도 동작(내부적으로 [0])
 
   let batch = writeBatch(db);
   let count = 0;
 
   for (const type of selectedTypes.value) {
-    const lens = getLens(type);
-
+    const typeUom = TYPE_MAP.value[type]?.uom ?? null; // masters.types.uom
     for (const proc of activeProcesses.value) {
-      if (!matrix.value[type]?.[proc.tag]) continue;
-
+      const productLevel = proc.product_level ?? null; // masters.processes.product_level
       for (const line of linesArr.value) {
-        for (const inch of inchesArr.value) {
-          for (const L of lens) {
-            const itemId = buildItemId(type,line,inch,proc.tag,L);
-            const ref = doc(db,"items",itemId);
+        for (const inchN of inchesNum.value) {
+          const inchStr = inchToStr(inchN);
+          for (const L of lengthsArr.value) {
+            const itemId = buildItemId(type, line, inchN, proc.tag, L);
+            const ref = doc(db, "items", itemId);
             batch.set(ref, {
-              itemId, type, line, inch,
+              /* Keys */
+              itemId,
+              /* Master dims */
+              type,
+              line,
+              inch: inchStr,                 // 스키마에 맞게 string 저장
+              length_mm: L,                  // 필드는 유지(0 허용)
+              process: proc.name,            // 공정 코드
               process_tag: proc.tag,
-              process: proc.name,
-              length_mm: L,
-              created_at: serverTimestamp()
-            }, { merge:true });
+
+              /* New fields from masters */
+              product_level: productLevel,   // processes.product_level
+              uom: typeUom || 'EA',          // types.uom (없으면 기본값 'EA')
+
+              /* Meta */
+              active: true,
+              created_at: serverTimestamp(),
+            }, { merge: true });
+
             count++;
-            if (count % 450 === 0) { await batch.commit(); batch = writeBatch(db); }
+            if (count % 450 === 0) {
+              await batch.commit();
+              batch = writeBatch(db);
+            }
           }
         }
       }
     }
   }
+
   await batch.commit();
   alert(`업로드 완료 (${count}개)`);
 }
@@ -186,7 +183,7 @@ async function upload(){
   <section class="wrap">
     <!-- 헤더 -->
     <header class="topbar">
-      <h2 class="title">매트릭스 기반 아이템 대량 생성</h2>
+      <h2 class="title">아이템 대량 생성 (곱하기 방식)</h2>
       <div class="right">
         <span class="muted">예상 생성: <b>{{ expectedCount }}</b> 건</span>
         <button class="btn-blue" @click="upload">업로드</button>
@@ -209,11 +206,13 @@ async function upload(){
           <label v-for="t in TYPE_CODES" :key="t" class="chip" :class="{on:selectedTypes.includes(t)}">
             <input type="checkbox" v-model="selectedTypes" :value="t" />
             <span class="mono">{{ t }}</span>
-            <span class="badge">{{ getLens(t).join(',') }}mm</span>
+            <!-- 미묘하지만 uom 힌트가 필요하면 아래처럼 노출 가능
+            <span class="badge mono" v-if="TYPE_MAP[t]?.uom">{{ TYPE_MAP[t]?.uom }}</span>
+            -->
           </label>
         </div>
 
-        <p class="hint">기본 길이: masters/type_defaults → 미설정 시 아래 Fallback × 조합</p>
+        <p class="hint">길이값은 대부분 쓰지 않으며, <b>비었거나 0 또는 1000≠값</b>일 때만 itemId 뒤에 붙습니다.</p>
       </div>
 
       <!-- 파라미터 + 공정 선택 -->
@@ -232,8 +231,8 @@ async function upload(){
             <input v-model="INCHES" class="input" placeholder="0.5,0.75,1,1.25…" />
           </label>
           <label>
-            <span>Fallback 길이(mm, 콤마 가능)</span>
-            <input v-model="FALLBACKS" class="input" placeholder="1000 또는 1000,1200,1500" />
+            <span>Lengths(mm, 콤마 숫자 / 비워도 됨)</span>
+            <input v-model="LENGTHS" class="input" placeholder="예) 1000 또는 공백" />
           </label>
         </div>
 
@@ -245,7 +244,13 @@ async function upload(){
           </div>
         </div>
         <div class="chips">
-          <label v-for="p in PROC_OPTS" :key="p.tag" class="chip" :class="{on:selectedProcTags.includes(p.tag)}">
+          <label
+            v-for="p in PROC_OPTS"
+            :key="p.tag"
+            class="chip"
+            :class="{on:selectedProcTags.includes(p.tag)}"
+            title="product_level은 저장 시 자동 반영"
+          >
             <input type="checkbox" v-model="selectedProcTags" :value="p.tag" />
             <span>{{ p.name }}</span>
             <span class="badge mono">{{ p.tag }}</span>

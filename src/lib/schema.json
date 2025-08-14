@@ -1,0 +1,98 @@
+{
+  "indexes": [],
+  "notes": "초기 템플릿. 업데이트 후 저장하세요.",
+  "schemaVersion": "0.3.0",
+  "updated_at": "250813",
+
+  "collections": {
+    "bom": {
+      "desc": "제품/반제품/원자재 간 연결 bom정리 (관계, 수량등)",
+      "fields": [
+        "parentId: string",
+        "childId: string",
+        "qtyPerParent : number",
+        "uomParent: string",
+        "uomChild: string",
+        "newField: string"
+      ],
+      "key": "key = `${parentId}__${childId}`"
+    },
+    "items": {
+      "desc": "품목 마스터(반제품/완제품/포장품 혼재.. product_level 0 = 출하완료 / 4 = 원자재)",
+      "fields": [
+        "created_at: Timestamp",
+        "itemId: string",
+        "type: string",
+        "line: string",
+        "inch: string",
+        "length_mm: number",
+        "process: string",
+        "process_tag: string",
+        "label?: string",
+        "product_level: number",
+        "uom: 'EA'|'M'|'ST'",
+        "active: boolean",
+        "updated_at: Timestamp"
+      ],
+      "key": "itemId"
+    },
+    "masters": {
+      "desc": "드롭다운/라벨/공정 기본정보",
+      "docs": {
+        "lines": {
+          "list": "[{ code, label, enabled, order }]"
+        },
+        "meta": "이 문서 자체",
+        "packing_statuses": {
+          "list": "[{ code, label, enabled, order }]"
+        },
+        "processes": {
+          "list": "[{ code, label, tag, uom?, enabled, order, product_level }]"
+        },
+        "types": {
+          "list": "[{ code, label, enabled, order }]"
+        }
+      }
+    },
+    "productions": {
+      "desc": "공정 실적 로그",
+      "fields": [
+        "ts: Timestamp",
+        "lotId: string",
+        "itemId: string",
+        "type: string",
+        "line: string",
+        "inch: string",
+        "length_mm: number",
+        "process: string",
+        "process_tag: string",
+        "qty: number",
+        "uom: 'EA'|'M'|'ST'",
+        "stationId: string"
+      ],
+      "key": "(auto)"
+    },
+    "ship_tos": {
+      "desc": "수령처 마스터(드롭박스 표시용 라벨/담당/주소)",
+      "fields": [
+        "label: string",
+        "personInCharge: string",
+        "address: string",
+        "created_at: Timestamp",
+        "updated_at: Timestamp"
+      ],
+      "key": "id"
+    },
+    "uom_rules": {
+      "desc": "EA↔M 환산(집계 기준을 M로 통일할 때 사용)",
+      "fields": [
+        "base_uom: 'M'",
+        "ea_per_m?: number",
+        "note?: string",
+        "created_at: Timestamp",
+        "updated_at: Timestamp"
+      ],
+      "key": "key = `${type}_${line}_${inch}` (권장)"
+    }
+  }
+}

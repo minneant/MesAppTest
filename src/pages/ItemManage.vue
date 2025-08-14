@@ -1,4 +1,4 @@
-<script setup lang="ts">
+<script setup lang="ts"> 
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { db } from "@/firebase";
 import {
@@ -12,23 +12,41 @@ type ItemRow = {
   itemId: string;
   type: string;
   line: string;
-  inch: number;
+  inch: number;            // UI에서는 number로 보유(정렬/필터 편의)
   process_tag: string;
   process?: string;
   length_mm: number;
   created_at?: any;
+
+  /* 신규/유지 필드 */
+  product_level?: number;
+  uom?: 'EA'|'M'|'ST';
+  active?: boolean;
+  updated_at?: any;
 };
 
 /* ---------------- Masters from DB ---------------- */
 const { types, lines, processes } = useMasters();
+
 // codes
 const TYPE_CODES = computed(() => (types.value || []).map(t => t.code));
 const LINE_CODES = computed(() => (lines.value || []).map(l => l.code));
 const PROCESS_CODES = computed(() => (processes.value || []).map(p => p.code));
-// process -> tag map
+
+/* 마스터 맵 */
+const TYPE_UOM_MAP = computed<Record<string, string|undefined>>(() => {
+  const m: Record<string, string|undefined> = {};
+  (types.value || []).forEach((t:any) => m[t.code] = t.uom);
+  return m;
+});
 const PROCESS_TAG_MAP = computed<Record<string, string>>(() => {
   const m: Record<string, string> = {};
   (processes.value || []).forEach((p: any) => { m[p.code] = p.tag || ""; });
+  return m;
+});
+const PROCESS_LEVEL_MAP = computed<Record<string, number|undefined>>(() => {
+  const m: Record<string, number|undefined> = {};
+  (processes.value || []).forEach((p: any) => { m[p.code] = p.product_level; });
   return m;
 });
 const tagOf = (proc?: string) => (proc ? (PROCESS_TAG_MAP.value[proc] || "") : "");
@@ -38,7 +56,7 @@ const rows = ref<ItemRow[]>([]);
 const loading = ref(false);
 const errorMsg = ref("");
 
-/* Filters (UI 상태) — 그대로 유지(데이터에 존재하는 값 기반) */
+/* Filters (UI 상태) — 데이터 기반 옵션 유지 */
 const fTypes = ref<string[]>([]);
 const fLines = ref<string[]>([]);
 const fTags = ref<string[]>([]);
@@ -50,6 +68,7 @@ const fSearch = ref<string>("");
 
 /* Multi-select */
 const selectedIds = ref<Set<string>>(new Set());
+const filtered = computed(() => rows.value.filter(r => passesExcept(r, null)));
 const selectedRows = computed(() => filtered.value.filter(r => selectedIds.value.has(r.itemId)));
 const allChecked = computed({
   get() {
@@ -84,9 +103,17 @@ onMounted(load);
 async function load() {
   loading.value = true; errorMsg.value = "";
   try {
-    const q = query(collection(db, "items"), orderBy("itemId"), limit(8000));
-    const snap = await getDocs(q);
-    rows.value = snap.docs.map(d => d.data() as ItemRow);
+    const qy = query(collection(db, "items"), orderBy("itemId"), limit(8000));
+    const snap = await getDocs(qy);
+    rows.value = snap.docs.map(d => {
+      const x = d.data() as any;
+      // DB의 inch는 문자열일 수 있으므로 숫자로 변환해 UI에 보유
+      const inchNum = Number(x.inch ?? x.inch_str ?? x.inchNum);
+      return {
+        ...x,
+        inch: Number.isFinite(inchNum) ? inchNum : 0,
+      } as ItemRow;
+    });
   } catch (e: any) {
     errorMsg.value = e?.message ?? String(e);
   } finally {
@@ -96,9 +123,21 @@ async function load() {
 
 /* ---------------- Helpers ---------------- */
 const lc = (s?: string) => (s ?? "").toLowerCase();
-function buildItemId(type: string, line: string, inch: number, tag: string, length_mm: number) {
-  return `${type}_${line}_${inch}_${tag}_L${length_mm}`;
+
+/** UI number → DB/ID용 문자열(불필요한 .0 제거) */
+function inchToStr(n:number) {
+  if (Number.isInteger(n)) return String(n);
+  return String(n).replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.0+$/,'');
 }
+
+/** itemId 생성 규칙(길이 suffix는 >0 && !==1000 일 때만) */
+function buildItemId(type: string, line: string, inchN: number, tag: string, length_mm: number) {
+  const inch = inchToStr(inchN);
+  let id = `${type}_${line}_${inch}_${tag}`;
+  if (length_mm > 0 && length_mm !== 1000) id += `_${length_mm}`;
+  return id;
+}
+
 function createdAtMs(v:any): number | null {
   if (!v) return null;
   if (typeof v?.toDate === "function") return v.toDate().getTime();
@@ -168,9 +207,6 @@ const dlLineOptions = computed(() => {
   return Array.from(s).sort();
 });
 
-/* 최종 목록 */
-const filtered = computed(() => rows.value.filter(r => passesExcept(r, null)));
-
 /* 요약 텍스트 */
 const lengthSummary = computed(() =>
   fLens.value.length ? (fLens.value.length <= 3 ? fLens.value.join(", ") : `${fLens.value.length}개 선택`) : "전체"
@@ -200,70 +236,97 @@ watch([fLengthOpts], () => { fLens.value = pruneMulti(fLens.value, new Set(fLeng
 watch(createProc, (p) => { createTag.value = p ? tagOf(p) : ""; });
 
 const computedCreateId = computed(() => {
-  if (!createType.value || !createLine.value || createInch.value == null || !createTag.value || createLen.value == null) return "";
-  return buildItemId(createType.value, createLine.value, Number(createInch.value), createTag.value, Number(createLen.value));
+  if (!createType.value || !createLine.value || createInch.value == null || !createTag.value) return "";
+  const L = Number(createLen.value ?? 0);
+  return buildItemId(createType.value, createLine.value, Number(createInch.value), createTag.value, L);
 });
 
 function openCreate() {
   showCreate.value = true;
-  if (createLen.value == null) createLen.value = 1000;
+  if (createLen.value == null) createLen.value = 1000; // 기본값 유지(아이디엔 안 붙음)
 }
 
 async function createItem() {
   if (!computedCreateId.value) { alert("필수값을 모두 입력하세요."); return; }
-  const payload: ItemRow = {
+
+  const inchStr = inchToStr(Number(createInch.value!));
+  const L = Number(createLen.value ?? 0);
+  const payload: any = {
     itemId: computedCreateId.value,
     type: createType.value,
     line: createLine.value,
-    inch: Number(createInch.value),
+    inch: inchStr, // DB 저장은 문자열
     process_tag: createTag.value,
     process: createProc.value || undefined,
-    length_mm: Number(createLen.value),
-    created_at: serverTimestamp()
+    length_mm: L,
+    created_at: serverTimestamp(),
+    updated_at: serverTimestamp(),
+    uom: (TYPE_UOM_MAP.value[createType.value] as any) || 'EA',
+    product_level: PROCESS_LEVEL_MAP.value[createProc.value] ?? undefined,
+    active: true,
   };
+
   const ref = doc(db, "items", payload.itemId);
   const exist = await getDoc(ref);
   if (exist.exists() && !confirm("같은 itemId가 있습니다. 덮어쓸까요?")) return;
   await setDoc(ref, payload, { merge: true });
-  rows.value.unshift({ ...payload, created_at: new Date() });
+
+  // UI rows에는 inch를 number로 재주입
+  rows.value.unshift({
+    ...(payload as ItemRow),
+    inch: Number(createInch.value),
+    created_at: new Date(),
+  });
+
   showCreate.value = false;
   createType.value = createLine.value = "";
   createProc.value = createTag.value = "";
-  createInch.value = null; createLen.value = 1000;
+  createInch.value = null; createLen.value = null;
 }
 
 /* ---------------- Edit ---------------- */
 function startEdit(r: ItemRow) { editingId.value = r.itemId; editCache.value = { ...r }; }
 function cancelEdit() { editingId.value = null; editCache.value = null; }
-const computedEditId = computed(() => {
-  const e = editCache.value; if (!e) return "";
-  return buildItemId(e.type, e.line, Number(e.inch), e.process_tag, Number(e.length_mm));
-});
+
 function onEditProcessChange() {
   if (!editCache.value) return;
   const p = editCache.value.process || "";
   editCache.value.process_tag = tagOf(p) || editCache.value.process_tag;
+  editCache.value.product_level = PROCESS_LEVEL_MAP.value[p] ?? editCache.value.product_level;
 }
+
+const computedEditId = computed(() => {
+  const e = editCache.value; if (!e) return "";
+  return buildItemId(e.type, e.line, Number(e.inch), e.process_tag, Number(e.length_mm));
+});
+
 async function saveEdit(orig: ItemRow) {
   if (!editCache.value) return;
   const e = editCache.value, newId = computedEditId.value;
   if (!newId) { alert("필수값을 확인하세요."); return; }
 
-  const newPayload: ItemRow = {
+  const inchStr = inchToStr(Number(e.inch));
+  const newPayload: any = {
     itemId: newId,
     type: e.type,
     line: e.line,
-    inch: Number(e.inch),
+    inch: inchStr,                        // DB에는 문자열
     process_tag: e.process_tag,
     process: e.process || undefined,
     length_mm: Number(e.length_mm),
     created_at: orig.created_at ?? serverTimestamp(),
+    updated_at: serverTimestamp(),
+    uom: (TYPE_UOM_MAP.value[e.type] as any) || 'EA',
+    product_level: (e.process && PROCESS_LEVEL_MAP.value[e.process] !== undefined)
+      ? PROCESS_LEVEL_MAP.value[e.process]
+      : e.product_level,
+    active: (orig.active ?? true),
   };
 
   if (newId === orig.itemId) {
     await setDoc(doc(db, "items", newId), newPayload, { merge: true });
     const idx = rows.value.findIndex(x => x.itemId === orig.itemId);
-    if (idx >= 0) rows.value[idx] = { ...newPayload };
+    if (idx >= 0) rows.value[idx] = { ...e, ...newPayload, inch: Number(e.inch) };
   } else {
     const newRef = doc(db, "items", newId);
     const exist = await getDoc(newRef);
@@ -271,7 +334,7 @@ async function saveEdit(orig: ItemRow) {
     await setDoc(newRef, newPayload, { merge: true });
     await deleteDoc(doc(db, "items", orig.itemId));
     const idx = rows.value.findIndex(x => x.itemId === orig.itemId);
-    if (idx >= 0) rows.value.splice(idx, 1, { ...newPayload });
+    if (idx >= 0) rows.value.splice(idx, 1, { ...e, ...newPayload, inch: Number(e.inch) });
   }
   editingId.value = null; editCache.value = null;
 }
@@ -302,14 +365,17 @@ async function deleteSelected() {
 }
 
 /* ---------------- CSV export/import ---------------- */
+/* 내보내기: 새 스키마 포함 */
 function toCSV(records: ItemRow[]) {
-  const headers = ["itemId","type","line","inch","process","process_tag","length_mm","created_at"];
+  const headers = ["itemId","type","line","inch","process","process_tag","length_mm","product_level","uom","active","created_at","updated_at"];
   const esc = (v:any) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
   };
   const lines = records.map(r => [
-    r.itemId, r.type, r.line, r.inch, r.process ?? "", r.process_tag, r.length_mm, formatCreatedAt(r.created_at)
+    r.itemId, r.type, r.line, inchToStr(r.inch), r.process ?? "", r.process_tag, r.length_mm,
+    r.product_level ?? "", r.uom ?? "", r.active ?? "",
+    formatCreatedAt(r.created_at), formatCreatedAt(r.updated_at)
   ].map(esc).join(","));
   return [headers.join(","), ...lines].join("\n");
 }
@@ -323,6 +389,8 @@ function exportSelectedCSV() {
   if (!selectedRows.value.length) { alert("선택된 항목이 없습니다."); return; }
   download(`items_selected_${new Date().toISOString().slice(0,19)}.csv`, toCSV(selectedRows.value));
 }
+
+/* 업로드: 새/구 헤더 모두 허용 */
 function parseCSV(text: string): string[][] {
   const out:string[][]=[]; let cell=""; let row:string[]=[]; let q=false;
   for (let i=0;i<text.length;i++){
@@ -337,20 +405,28 @@ function parseCSV(text: string): string[][] {
   if (cell.length || row.length){ row.push(cell); out.push(row); }
   return out;
 }
+
 async function onCSVChoose(e: Event) {
   const input = e.target as HTMLInputElement;
   const file = input.files?.[0]; if (!file) return;
   const txt = await file.text();
 
   const arr = parseCSV(txt).filter(r => r.length && r.some(c=>c!==""));
-  const header = arr.shift()!;
-  const need = ["itemId","type","line","inch","process","process_tag","length_mm","created_at"];
-  if (!header || need.some((h,i)=> (header[i]||"").trim() !== h)) {
-    alert("CSV 헤더가 올바르지 않습니다.\n필요 헤더: " + need.join(",")); input.value=""; return;
+  const header = arr.shift()!.map(h => h.trim());
+  const newHdr = ["itemId","type","line","inch","process","process_tag","length_mm","product_level","uom","active","created_at","updated_at"];
+  const oldHdr = ["itemId","type","line","inch","process","process_tag","length_mm","created_at"];
+
+  let mode:"new"|"old"|null = null;
+  if (newHdr.every((h,i)=> header[i]===h)) mode = "new";
+  else if (oldHdr.every((h,i)=> header[i]===h)) mode = "old";
+
+  if (!mode) {
+    alert("CSV 헤더가 올바르지 않습니다.\n허용 헤더(둘 중 하나):\n" + newHdr.join(",") + "\n" + oldHdr.join(","));
+    input.value=""; return;
   }
 
   const batchSize = 400;
-  let buf: ItemRow[] = [];
+  let buf: any[] = [];
   const flush = async () => {
     if (!buf.length) return;
     const batch = writeBatch(db);
@@ -359,20 +435,65 @@ async function onCSVChoose(e: Event) {
   };
 
   for (const c of arr) {
-    const [,_type,_line,_inch,_proc,_tag,_len,_created] = c;
-    const type=_type, line=_line;
-    const inch=Number(_inch), length_mm=Number(_len);
-    const process=_proc || undefined;
-    const process_tag = process ? (tagOf(process) || _tag) : _tag;
+    const col = (i:number)=> (c[i] ?? "").trim();
+    if (mode === "new") {
+      const [id,_type,_line,_inch,_proc,_tag,_len,_lvl,_uom,_active,_created,_updated] = c;
+      const inchStr = col(3);
+      const inchNum = Number(inchStr);
+      const type = col(1), line = col(2);
+      const process = col(4) || undefined;
+      const process_tag = process ? (tagOf(process) || col(5)) : col(5);
+      const length_mm = Number(col(6)) || 0;
+      const product_level = col(7) === "" ? undefined : Number(col(7));
+      const uom = (col(8) || undefined) as any;
+      const active = col(9)==="" ? undefined : (col(9).toLowerCase() === "true" ? true : col(9).toLowerCase() === "false" ? false : undefined);
 
-    let created:any = serverTimestamp();
-    if (_created && _created.trim()) {
-      const n = Number(_created); const d = isNaN(n) ? new Date(_created) : new Date(n);
-      if (!isNaN(d.getTime())) created = d;
+      let created:any = serverTimestamp();
+      if (col(10)) {
+        const n = Number(col(10)); const d = isNaN(n) ? new Date(col(10)) : new Date(n);
+        if (!isNaN(d.getTime())) created = d;
+      }
+      let updated:any = serverTimestamp();
+      if (col(11)) {
+        const n = Number(col(11)); const d = isNaN(n) ? new Date(col(11)) : new Date(n);
+        if (!isNaN(d.getTime())) updated = d;
+      }
+
+      const itemId = buildItemId(type, line, Number.isFinite(inchNum)?inchNum:0, process_tag, length_mm);
+      buf.push({
+        itemId,
+        type, line, inch: inchStr || inchToStr(Number(inchNum)),
+        process, process_tag, length_mm,
+        product_level, uom, active,
+        created_at: created, updated_at: updated,
+      });
+
+    } else { // old
+      const [,_type,_line,_inch,_proc,_tag,_len,_created] = c;
+      const type = col(1), line = col(2);
+      const inchNum = Number(col(3));
+      const process = col(4) || undefined;
+      const process_tag = process ? (tagOf(process) || col(5)) : col(5);
+      const length_mm = Number(col(6)) || 0;
+
+      let created:any = serverTimestamp();
+      if (col(7)) {
+        const n = Number(col(7)); const d = isNaN(n) ? new Date(col(7)) : new Date(n);
+        if (!isNaN(d.getTime())) created = d;
+      }
+
+      const itemId = buildItemId(type, line, inchNum, process_tag, length_mm);
+      buf.push({
+        itemId, type, line, inch: inchToStr(inchNum),
+        process, process_tag, length_mm,
+        // 마스터 기반 값 자동 반영
+        uom: (TYPE_UOM_MAP.value[type] as any) || 'EA',
+        product_level: process ? PROCESS_LEVEL_MAP.value[process] : undefined,
+        active: true,
+        created_at: created, updated_at: serverTimestamp(),
+      });
     }
 
-    const id = buildItemId(type, line, inch, process_tag, length_mm);
-    buf.push({ itemId:id, type, line, inch, process, process_tag, length_mm, created_at: created });
     if (buf.length >= batchSize) await flush();
   }
   await flush();
@@ -630,7 +751,14 @@ onUnmounted(() => {
               <td class="px-3 py-2 text-center">{{ r.inch }}</td>
               <td class="px-3 py-2 text-center">{{ r.process_tag }}</td>
               <td class="px-3 py-2 text-center">{{ r.process || '—' }}</td>
-              <td class="px-3 py-2 text-center">{{ r.length_mm }}</td>
+              <td class="px-3 py-2 text-center">
+                <template v-if="Number(r.length_mm) > 0">
+                  {{ r.length_mm }}
+                </template>
+                <template v-else>
+                  <span class="uom-badge">{{ r.uom || 'EA' }}</span>
+                </template>
+              </td>
               <td class="px-3 py-2 text-center">{{ fmtCreatedShort(r.created_at) }}</td>
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
@@ -666,12 +794,13 @@ onUnmounted(() => {
               </td>
 
               <!-- tag 표시만 -->
-              <td class="px-3 py-2 text-center text-gray-400">—</td>
+              <td class="px-3 py-2 text-center text-gray-400">
+                {{ editCache!.process_tag }}
+              </td>
 
-              <!-- process: select (DB 마스터 기준) + tag 동기화 -->
+              <!-- process: select (DB 마스터 기준) + tag/product_level 동기화 -->
               <td class="px-3 py-2">
                 <div class="proc-wrap">
-                  <span class="tag-badge">{{ editCache!.process_tag }}</span>
                   <select v-model="editCache!.process" @change="onEditProcessChange" class="input">
                     <option value="" disabled>선택</option>
                     <option v-for="p in PROCESS_CODES" :key="p" :value="p">{{ p }}</option>
@@ -699,7 +828,7 @@ onUnmounted(() => {
         </tbody>
       </table>
 
-      <!-- datalist (유지) -->
+      <!-- datalist -->
       <datalist id="typeList">
         <option v-for="t in dlTypeOptions" :key="t" :value="t" />
       </datalist>
@@ -810,16 +939,14 @@ onUnmounted(() => {
   padding: .5rem; box-shadow: 0 10px 24px rgba(0,0,0,.08); z-index: 50;
 }
 
-/* badge */
+/* badges & layout helpers */
 .tag-badge {
   display:inline-flex; align-items:center; justify-content:center;
   padding:.25rem .5rem; border-radius:.5rem;
   background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
   font-size:.8rem; white-space:nowrap;
 }
-
-/* 겹침 방지 */
 .no-wrap { white-space:nowrap; }
 
 /* 파일 input 완전 숨김 */
@@ -833,9 +960,10 @@ onUnmounted(() => {
   white-space:nowrap !important;
   opacity:0 !important;
 }
+
 /* inch 입력칸 슬림 + 중앙정렬 */
 .compact-input { width: 6rem !important; text-align: center; }
 
-/* process 셀렉트와 tag 배지 나란히 */
+/* process 셀렉트 */
 .proc-wrap { display: inline-flex; align-items: center; gap: .5rem; flex-wrap: wrap; justify-content: center; }
 </style>
