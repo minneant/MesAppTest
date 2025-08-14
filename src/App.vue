@@ -19,7 +19,22 @@
         <!-- 구분선 -->
         <li class="sep" aria-hidden="true"></li>
 
-        <!-- 2) 생산실적 입력 (드롭다운) -->
+        <!-- 2) 재고 조회 (단일 링크) -->
+        <li class="nav-item">
+          <RouterLink
+            class="nav-link"
+            :class="{active: isActive('/inventory')}"
+            to="/inventory"
+            @click="close()"
+          >
+            재고 조회
+          </RouterLink>
+        </li>
+
+        <!-- 구분선 -->
+        <li class="sep" aria-hidden="true"></li>
+
+        <!-- 3) 생산실적 입력 (드롭다운) -->
         <li class="nav-item nav-group" @keydown.escape="openGroup=null">
           <button
             class="nav-btn"
@@ -41,7 +56,7 @@
         <!-- 구분선 -->
         <li class="sep" aria-hidden="true"></li>
 
-        <!-- 3) 아이템 관리 (드롭다운) -->
+        <!-- 4) 아이템 관리 (드롭다운) -->
         <li class="nav-item nav-group" @keydown.escape="openGroup=null">
           <button
             class="nav-btn"
@@ -53,11 +68,11 @@
             <span class="caret">▾</span>
           </button>
           <ul v-if="openGroup==='아이템 관리'" class="dropdown">
-            <li><RouterLink class="dd-link" to="/bulk-boms"     @click="close()">BOM 대량 생성</RouterLink></li>
-            <li><RouterLink class="dd-link" to="/bom-manage"    @click="close()">BOM 관리</RouterLink></li>
-            <li><RouterLink class="dd-link" to="/bulk-items"    @click="close()">Item 대량 생성</RouterLink></li>
-            <li><RouterLink class="dd-link" to="/item-manage"   @click="close()">Item 관리</RouterLink></li>
-            <li><RouterLink class="dd-link" to="/master-manage" @click="close()">기타태그 관리</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/bulk-boms"       @click="close()">BOM 대량 생성</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/bom-manage"      @click="close()">BOM 관리</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/bulk-items"      @click="close()">Item 대량 생성</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/item-manage"     @click="close()">Item 관리</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/masters-manage"  @click="close()">기타태그 관리</RouterLink></li>
           </ul>
         </li>
       </ul>
@@ -106,7 +121,7 @@ onBeforeUnmount(()=> document.removeEventListener('click', onDocClick, true))
 }
 .navwrap{
   display:flex; align-items:center; justify-content:space-between;
-  gap:12px; padding:10px 14px; max-width:1200px; margin:0 auto;
+  gap:12px; padding:10px 16px; /* ✅ 가로 꽉 차게: max-width, margin 제거 */
 }
 .brand{
   font-weight:800; letter-spacing:.3px; cursor:pointer;
@@ -154,5 +169,9 @@ onBeforeUnmount(()=> document.removeEventListener('click', onDocClick, true))
 }
 .dd-link:hover{ background:#f0fdf4; color:#065f46; }
 
-.content{ padding:14px; max-width:1200px; margin:0 auto; }
+/* ✅ 페이지 본문: 가로 꽉 채우기 (여백 복원) */
+.content{
+  padding:14px 16px;  /* 좌우 패딩만 유지 */
+  /* max-width 제거, 가운데 정렬 제거 */
+}
 </style>

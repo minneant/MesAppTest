@@ -6,19 +6,20 @@
       <p class="sub">생산·아이템·BOM을 한눈에 — 아래 메뉴에서 바로 시작하세요</p>
     </div>
 
-    <!-- 펼친 네비: 1) 조회 2) 입력 3) 아이템 관리 -->
+    <!-- 펼친 네비: 1) 정보조회 2) 입력 3) 아이템 관리 -->
     <div class="grid">
-      <!-- 1) 생산실적 조회 -->
+      <!-- 1) 정보조회 -->
       <div class="card">
-        <h2>생산/출하 실적 조회</h2>
+        <h2>정보조회</h2>
         <div class="links">
-          <!-- ✅ 기본(생산량) — primary 제거 -->
           <RouterLink class="link" to="/production-history">
             생산 실적 조회
           </RouterLink>
-          <!-- ✅ 출하량 전용: process=Shipping 프리셋 -->
           <RouterLink class="link" to="/production-history?preset=shipping">
             출하 실적 조회
+          </RouterLink>
+          <RouterLink class="link" to="/inventory">
+            재고 조회
           </RouterLink>
         </div>
       </div>
@@ -42,7 +43,7 @@
           <RouterLink class="link" to="/bom-manage">BOM 관리</RouterLink>
           <RouterLink class="link" to="/bulk-items">Item 대량 생성</RouterLink>
           <RouterLink class="link" to="/item-manage">Item 관리</RouterLink>
-          <RouterLink class="link" to="/master-manage">기타태그 관리</RouterLink>
+          <RouterLink class="link" to="/masters-manage">기타태그 관리</RouterLink>
         </div>
       </div>
     </div>
