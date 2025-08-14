@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { useRoute } from "vue-router";
 import { db } from "@/firebase";
 import {
   collection, getDocs, orderBy, query, limit,
@@ -20,17 +21,31 @@ type ProdRow = {
   process_tag?: string; // CSV/DB만
   length_mm: number;
   qty: number;
-  isProduction?: boolean; // ✅ 추가: 생산/소진 구분
+  uom?: 'EA'|'M'|'ST';  // ✅ 추가: DB에 있을 수 있음
+  isProduction?: boolean; // 생산/소진 구분 (없으면 생산 취급)
 };
 
 /* ---------------- Masters (from DB) ---------------- */
 const { types, lines, processes } = useMasters();
-const TYPE_CODES = computed(() => (types.value || []).map(t => t.code));
-const LINE_CODES = computed(() => (lines.value || []).map(l => l.code));
-const PROCESS_CODES = computed(() => (processes.value || []).map(p => p.code));
-const PROCESS_TAG_MAP = computed<Record<string,string>>(() => {
-  const m: Record<string,string> = {};
-  (processes.value || []).forEach((p:any) => { m[p.code] = p.tag || ""; });
+const TYPE_CODES = computed(() => (types.value || []).map((t:any) => t.code));
+const LINE_CODES = computed(() => (lines.value || []).map((l:any) => l.code));
+const PROCESS_CODES = computed(() => (processes.value || []).map((p:any) => p.code));
+
+/* type -> uom 맵 */
+const TYPE_UOM_MAP = computed<Record<string,'EA'|'M'|'ST'>>(() => {
+  const m: Record<string,'EA'|'M'|'ST'> = {};
+  (types.value || []).forEach((t:any) => {
+    const u = (t.uom as 'EA'|'M'|'ST') || 'EA';
+    m[t.code] = u;
+  });
+  return m;
+});
+const uomOfType = (type?: string) => (type ? (TYPE_UOM_MAP.value[type] || 'EA') : 'EA');
+
+/* process -> tag 맵 */
+const PROCESS_TAG_MAP = computed<Record<string, string>>(() => {
+  const m: Record<string, string> = {};
+  (processes.value || []).forEach((p: any) => { m[p.code] = p.tag || ""; });
   return m;
 });
 const tagOf = (proc?: string) => (proc ? (PROCESS_TAG_MAP.value[proc] || "") : "");
@@ -60,8 +75,12 @@ function localIsoMinute(d: Date = new Date()) {
   const t = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
   return t.toISOString().slice(0, 16);
 }
-function buildItemId(type: string, line: string, inch: number, tag: string, length_mm: number) {
-  return `${type}_${line}_${inch}_${tag}_L${length_mm}`;
+/** ✅ 최신 itemId 규칙 */
+function buildItemId(type: string, line: string, inch: number, tag: string, length_mm?: number) {
+  let id = `${type}_${line}_${inch}_${tag}`;
+  const L = Number(length_mm);
+  if (Number.isFinite(L) && L > 0 && L !== 1000) id += `_${L}`;
+  return id;
 }
 function buildLotId(itemId: string, tsVal: any) {
   const d = new Date(tsMs(tsVal));
@@ -73,11 +92,12 @@ function buildLotId(itemId: string, tsVal: any) {
 }
 
 /* ---------------- State ---------------- */
+const route = useRoute();
 const rows = ref<ProdRow[]>([]);
 const loading = ref(false);
 const errorMsg = ref("");
 
-/* 표시 모드(기본: 생산만) ✅ */
+/* 표시 모드(기본: 생산만) */
 type Mode = 'prod'|'cons'|'both';
 const mode = ref<Mode>('prod');
 
@@ -113,7 +133,12 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const chosenFileName = ref<string>("선택된 파일 없음");
 
 /* ---------------- Init ---------------- */
-onMounted(load);
+onMounted(async () => {
+  await load();
+  applyPresetFromRoute(); // ✅ /production-history?preset=shipping 대응
+});
+watch(() => route.query.preset, applyPresetFromRoute);
+
 async function load() {
   loading.value = true; errorMsg.value = "";
   try {
@@ -127,6 +152,15 @@ async function load() {
   }
 }
 
+/* ✅ 출하 프리셋: isProduction=true + process='Shipping' */
+function applyPresetFromRoute() {
+  const p = String(route.query.preset || "").toLowerCase();
+  if (p === "shipping") {
+    mode.value = 'prod';
+    fProcesses.value = ['Shipping'];
+  }
+}
+
 /* ---------- 동적 옵션 생성을 위한 필터 ---------- */
 type FilterField = "type"|"line"|"process"|"inch"|"length_mm"|"qty";
 function isProd(r: ProdRow) {
@@ -134,7 +168,7 @@ function isProd(r: ProdRow) {
   return r.isProduction !== false;
 }
 function passesExcept(r: ProdRow, exclude: FilterField | null): boolean {
-  // ✅ 모드 필터
+  // 모드 필터
   if (mode.value === 'prod' && !isProd(r)) return false;
   if (mode.value === 'cons' && isProd(r)) return false;
 
@@ -213,13 +247,22 @@ const createLine = ref<string>("");
 const createInch = ref<number | null>(null);
 const createProcess = ref<string>("");
 const createTag = computed(() => (createProcess.value ? tagOf(createProcess.value) : ""));
-const createLen = ref<number | null>(1000);
+const createLen = ref<number | null>(null); // 선택(0/1000면 suffix 없음)
 const createQty = ref<number | null>(1);
 const createTs = ref<string>(localIsoMinute());
+const createIsProd = ref<'true'|'false'>('true'); // ✅ 생산/소진
+
+const createUom = computed<'EA'|'M'|'ST'>(() => uomOfType(createType.value));
 
 const computedCreateItemId = computed(() => {
-  if (!createType.value || !createLine.value || createInch.value == null || !createLen.value || !createProcess.value) return "";
-  return buildItemId(createType.value, createLine.value, Number(createInch.value), createTag.value, Number(createLen.value));
+  if (!createType.value || !createLine.value || createInch.value == null || !createProcess.value) return "";
+  return buildItemId(
+    createType.value,
+    createLine.value,
+    Number(createInch.value),
+    createTag.value,
+    createLen.value == null ? undefined : Number(createLen.value)
+  );
 });
 const computedCreateLotId = computed(() => {
   if (!computedCreateItemId.value || !createTs.value) return "";
@@ -228,14 +271,14 @@ const computedCreateLotId = computed(() => {
 
 function openCreate() {
   showCreate.value = true;
-  if (createLen.value == null) createLen.value = 1000;
   if (createQty.value == null) createQty.value = 1;
   if (!createTs.value) createTs.value = localIsoMinute();
+  if (!createIsProd.value) createIsProd.value = 'true';
 }
 
 async function createProduction() {
   if (!computedCreateItemId.value || !createQty.value || !createTs.value) {
-    alert("필수값(type/line/inch/process/length/qty/ts)을 입력하세요."); return;
+    alert("필수값(type/line/inch/process/qty/ts)을 입력하세요."); return;
   }
   const tsVal = new Date(createTs.value);
   const payload: ProdRow = {
@@ -247,9 +290,10 @@ async function createProduction() {
     inch: Number(createInch.value),
     process: createProcess.value,
     process_tag: createTag.value,
-    length_mm: Number(createLen.value),
+    length_mm: Number(createLen.value || 0), // 0 가능
     qty: Number(createQty.value),
-    isProduction: true, // ✅ 새로 추가하는 것은 생산으로 저장
+    uom: createUom.value,                    // ✅ masters에서 자동
+    isProduction: createIsProd.value === 'true',
   };
 
   const refNew = doc(collection(db, "productions"));
@@ -261,9 +305,10 @@ async function createProduction() {
   createLine.value = "";
   createInch.value = null;
   createProcess.value = "";
-  createLen.value = 1000;
+  createLen.value = null;
   createQty.value = 1;
   createTs.value = localIsoMinute();
+  createIsProd.value = 'true';
   showCreate.value = false;
 }
 
@@ -277,15 +322,15 @@ const computedEditItemId = computed(() => {
   const e = editCache.value;
   if (!e) return "";
   const tag = tagOf(e.process) || e.process_tag || "";
-  if (!e.type || !e.line || e.inch == null || e.length_mm == null || !tag) return e.itemId || "";
-  return buildItemId(e.type, e.line, Number(e.inch), tag, Number(e.length_mm));
+  if (!e.type || !e.line || e.inch == null || !tag) return e.itemId || "";
+  return buildItemId(e.type, e.line, Number(e.inch), tag, Number(e.length_mm || 0));
 });
 
 async function saveEdit(orig: ProdRow) {
   if (!editCache.value) return;
   const e = editCache.value;
 
-  if (!e.type || !e.line || e.inch == null || !e.process || e.length_mm == null || e.qty == null) {
+  if (!e.type || !e.line || e.inch == null || !e.process || e.qty == null) {
     alert("필수값을 확인하세요."); return;
   }
 
@@ -298,7 +343,7 @@ async function saveEdit(orig: ProdRow) {
   }
 
   const tagFixed = tagOf(e.process) || e.process_tag || "";
-  const newItemId = buildItemId(e.type, e.line, Number(e.inch), tagFixed, Number(e.length_mm));
+  const newItemId = buildItemId(e.type, e.line, Number(e.inch), tagFixed, Number(e.length_mm || 0));
   const newLotId = buildLotId(newItemId, tsVal);
 
   const payload: ProdRow = {
@@ -310,9 +355,10 @@ async function saveEdit(orig: ProdRow) {
     inch: Number(e.inch),
     process: e.process,
     process_tag: tagFixed,
-    length_mm: Number(e.length_mm),
+    length_mm: Number(e.length_mm || 0),
     qty: Number(e.qty),
-    isProduction: e.isProduction !== false, // ✅ 기존 값 유지(없으면 true로)
+    uom: e.uom || uomOfType(e.type),
+    isProduction: e.isProduction !== false, // 기존 값 유지(없으면 true로)
   };
 
   if (orig._id) {
@@ -360,7 +406,7 @@ async function deleteSelected() {
 
 /* ---------------- CSV export/import ---------------- */
 function toCSV(records: ProdRow[]) {
-  const headers = ["ts","lotId","itemId","type","line","inch","process","process_tag","length_mm","qty"];
+  const headers = ["ts","lotId","itemId","type","line","inch","process","process_tag","length_mm","qty","uom","isProduction"];
   const esc = (v:any) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
@@ -368,8 +414,8 @@ function toCSV(records: ProdRow[]) {
   const lines = records.map(r => [
     formatIso(r.ts), r.lotId, r.itemId, r.type, r.line, r.inch,
     r.process, (tagOf(r.process) || r.process_tag || ""),
-    r.length_mm, r.qty
-  ].map(esc).join(",")); 
+    r.length_mm, r.qty, (r.uom || uomOfType(r.type)), (r.isProduction !== false)
+  ].map(esc).join(","));
   return [headers.join(","), ...lines].join("\n");
 }
 function download(name: string, text: string) {
@@ -408,13 +454,16 @@ async function onCSVChoose(e: Event) {
   const arr = parseCSV(txt).filter(r => r.length && r.some(c=>c!==""));
   const header = arr.shift()!.map(h => (h || "").trim());
 
-  const needFull = ["ts","lotId","itemId","type","line","inch","process","process_tag","length_mm","qty"];
+  // isProduction, uom까지 있는 헤더 우선 지원
+  const needFull = ["ts","lotId","itemId","type","line","inch","process","process_tag","length_mm","qty","uom","isProduction"];
+  const needMid  = ["ts","lotId","itemId","type","line","inch","process","process_tag","length_mm","qty"];
   const needLite = ["ts","lotId","itemId","type","line","inch","process","length_mm","qty"];
   const modeCsv = header.join(",") === needFull.join(",") ? "full"
+            : header.join(",") === needMid.join(",") ? "mid"
             : header.join(",") === needLite.join(",") ? "lite" : "";
 
   if (!modeCsv) {
-    alert("CSV 헤더가 올바르지 않습니다.\n허용 헤더:\n" + needFull.join(",") + "\n또는\n" + needLite.join(","));
+    alert("CSV 헤더가 올바르지 않습니다.\n허용 헤더:\n" + needFull.join(",") + "\n또는\n" + needMid.join(",") + "\n또는\n" + needLite.join(","));
     input.value=""; chosenFileName.value="선택된 파일 없음"; return;
   }
 
@@ -431,13 +480,16 @@ async function onCSVChoose(e: Event) {
   };
 
   for (const c of arr) {
-    let tsStr, lotId, itemId, type, line, inchStr, process, process_tag, lengthStr, qtyStr;
+    let tsStr, lotId, itemId, type, line, inchStr, process, process_tag, lengthStr, qtyStr, uom, isProdStr;
 
     if (modeCsv === "full") {
+      [tsStr,lotId,itemId,type,line,inchStr,process,process_tag,lengthStr,qtyStr,uom,isProdStr] = c;
+    } else if (modeCsv === "mid") {
       [tsStr,lotId,itemId,type,line,inchStr,process,process_tag,lengthStr,qtyStr] = c;
+      uom = ""; isProdStr = "";
     } else {
       [tsStr,lotId,itemId,type,line,inchStr,process,lengthStr,qtyStr] = c;
-      process_tag = "";
+      process_tag = ""; uom = ""; isProdStr = "";
     }
 
     const inch = Number(inchStr);
@@ -451,7 +503,7 @@ async function onCSVChoose(e: Event) {
     }
 
     const tagFixed = tagOf(process) || (process_tag || "");
-    const fixedItemId = buildItemId(type, line, Number(inch), tagFixed, Number(length_mm));
+    const fixedItemId = buildItemId(type, line, Number(inch), tagFixed, Number(length_mm || 0));
     const fixedLotId  = buildLotId(fixedItemId, tsVal);
 
     const payload: ProdRow = {
@@ -460,8 +512,8 @@ async function onCSVChoose(e: Event) {
       process, process_tag: tagFixed,
       length_mm: Number.isFinite(length_mm) ? length_mm : 0,
       qty: Number.isFinite(qty) ? qty : 0,
-      // CSV에 isProduction 컬럼이 없으므로 보존 불가 → 기본 생산으로 간주
-      isProduction: true,
+      uom: (uom as any) || uomOfType(type),
+      isProduction: isProdStr ? (isProdStr.toLowerCase() === 'true') : true,
     };
 
     buf.push(payload);
@@ -537,7 +589,7 @@ onUnmounted(() => {
       <div class="flex items-center flex-wrap gap-2">
         <span class="text-sm text-gray-600">표시: <b>{{ filtered.length }}</b> / 전체 {{ rows.length }}</span>
 
-        <!-- ✅ 모드 선택 드롭다운 -->
+        <!-- 보기 모드 -->
         <label class="flex items-center gap-1 text-sm">
           <span class="text-gray-600">보기</span>
           <select v-model="mode" class="input" style="height:2.25rem">
@@ -566,7 +618,7 @@ onUnmounted(() => {
     <div v-if="errorMsg" class="text-red-600 text-sm">{{ errorMsg }}</div>
     <div v-else-if="loading" class="py-3">불러오는 중…</div>
 
-    <!-- Table -->
+    <!-- Table (예전 스타일) -->
     <div v-else class="relative overflow-auto rounded-xl border border-gray-200">
       <table class="w-full table-fixed border-separate border-spacing-0 text-sm">
         <colgroup>
@@ -577,10 +629,9 @@ onUnmounted(() => {
           <col style="width:7rem"/>
           <col style="width:6.5rem"/>
           <col style="width:8rem"/>
-          <col style="width:6.5rem"/>   <!-- length_mm -->
+          <col style="width:8.5rem"/>   <!-- length / UOM -->
           <col style="width:6.5rem"/>   <!-- qty -->
-          
-          <col style="width:11rem"/>   <!-- 액션 -->
+          <col style="width:11rem"/>    <!-- 액션 -->
         </colgroup>
 
         <thead>
@@ -609,7 +660,7 @@ onUnmounted(() => {
               process <span v-if="sortKey==='process'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
             <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('length_mm')">
-              length (mm) <span v-if="sortKey==='length_mm'">{{ sortDir==='asc'?'▲':'▼' }}</span>
+              length / UOM <span v-if="sortKey==='length_mm'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
             <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('qty')">
               qty <span v-if="sortKey==='qty'">{{ sortDir==='asc'?'▲':'▼' }}</span>
@@ -620,7 +671,6 @@ onUnmounted(() => {
                 <span>Total Qty: <b>{{ totalQty }}</b></span>
               </div>
             </th>
-
           </tr>
 
           <!-- 2줄: 필터 -->
@@ -717,19 +767,18 @@ onUnmounted(() => {
               </details>
             </th>
 
-              <!-- 액션 라벨 -->
+            <!-- 액션 라벨 -->
             <th class="px-3 py-2 text-center text-xs text-gray-500">액션</th>
           </tr>
         </thead>
 
         <tbody class="[&>tr:nth-child(odd)]:bg-gray-50">
-            <!-- 소진행은 tomato 색상 -->
-            <tr
-              v-for="r in sorted"
-              :key="selKeyOf(r)"
-              class="border-b hover:bg-blue-50/50"
-              :style="!isProd(r) ? { color: 'tomato' } : undefined"
-            >
+          <tr
+            v-for="r in sorted"
+            :key="selKeyOf(r)"
+            class="border-b hover:bg-blue-50/50"
+            :style="!isProd(r) ? { color: 'tomato' } : undefined"
+          >
             <template v-if="editingKey !== selKeyOf(r)">
               <td class="px-3 py-2">
                 <input type="checkbox"
@@ -743,7 +792,10 @@ onUnmounted(() => {
               <td class="px-3 py-2 text-center">{{ r.line }}</td>
               <td class="px-3 py-2 text-center">{{ r.inch }}</td>
               <td class="px-3 py-2 text-center">{{ r.process }}</td>
-              <td class="px-3 py-2 text-center">{{ r.length_mm }}</td>
+              <td class="px-3 py-2 text-center">
+                <span v-if="Number(r.length_mm||0) !== 0">{{ r.length_mm }}</span>
+                <span v-else class="font-mono">{{ r.uom || uomOfType(r.type) }}</span>
+              </td>
               <td class="px-3 py-2 text-center">{{ r.qty }}</td>
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
@@ -765,7 +817,7 @@ onUnmounted(() => {
               </td>
 
               <!-- itemId (자동계산 read-only) -->
-               <td class="px-3 py-2 font-mono text-[12.5px] no-wrap">{{ computedEditItemId }}</td>
+              <td class="px-3 py-2 font-mono text-[12.5px] no-wrap">{{ computedEditItemId }}</td>
               
               <!-- type select -->
               <td class="px-3 py-2">
@@ -800,7 +852,7 @@ onUnmounted(() => {
 
               <!-- length -->
               <td class="px-3 py-2">
-                <input type="number" v-model.number="editCache!.length_mm" class="input compact-input"/>
+                <input type="number" v-model.number="editCache!.length_mm" class="input compact-input" placeholder="0/1000 접미사 없음"/>
               </td>
 
               <!-- qty -->
@@ -818,17 +870,13 @@ onUnmounted(() => {
           </tr>
         </tbody>
       </table>
-
-      <!-- datalist -->
-      <datalist id="typeList"><option v-for="t in TYPE_CODES" :key="t" :value="t" /></datalist>
-      <datalist id="lineList"><option v-for="l in LINE_CODES" :key="l" :value="l" /></datalist>
     </div>
 
     <!-- Create modal -->
     <div v-if="showCreate" class="fixed inset-0 z-[9999] bg-black/40 flex items-start justify-center p-6">
       <div class="w-[min(780px,92vw)] max-h-[80vh] overflow-auto rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-base font-semibold">새 생산실적 추가</h3>
+          <h3 class="text-base font-semibold">새 실적 추가</h3>
           <button type="button" class="btn" @click="showCreate = false">닫기</button>
         </div>
 
@@ -863,7 +911,7 @@ onUnmounted(() => {
           </label>
 
           <label class="text-sm text-gray-600">length(mm)
-            <input type="number" v-model.number="createLen" class="mt-1 w-full input"/>
+            <input type="number" v-model.number="createLen" class="mt-1 w-full input" placeholder="빈칸/0/1000은 접미사 없음"/>
           </label>
 
           <label class="text-sm text-gray-600">qty
@@ -872,6 +920,17 @@ onUnmounted(() => {
 
           <label class="text-sm text-gray-600">ts
             <input type="datetime-local" v-model="createTs" class="mt-1 w-full input"/>
+          </label>
+
+          <label class="text-sm text-gray-600">구분
+            <select v-model="createIsProd" class="mt-1 w-full input">
+              <option value="true">생산</option>
+              <option value="false">소진</option>
+            </select>
+          </label>
+
+          <label class="text-sm text-gray-600">UOM
+            <input :value="createUom" readonly class="mt-1 w-full input bg-gray-50" />
           </label>
         </div>
 
@@ -892,21 +951,48 @@ onUnmounted(() => {
 <style scoped>
 :where(button, input, select) { all: revert; font: inherit; }
 
-/* Buttons */
-.btn { display:inline-flex; align-items:center; border:1px solid #d1d5db; background:#fff; padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s; }
+/* 공통 버튼 */
+.btn {
+  display:inline-flex; align-items:center;
+  border:1px solid #d1d5db; background:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
 .btn:hover { background:#f9fafb; }
 .btn:active { transform:scale(.98); }
-.btn-blue { display:inline-flex; align-items:center; border:1px solid #2563eb; background:#2563eb; color:#fff; padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s; }
+
+.btn-blue {
+  display:inline-flex; align-items:center;
+  border:1px solid #2563eb; background:#2563eb; color:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
 .btn-blue:hover { background:#1d4ed8; }
-.btn-rose { display:inline-flex; align-items:center; border:1px solid #e11d48; background:#e11d48; color:#fff; padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s; }
+
+.btn-rose {
+  display:inline-flex; align-items:center;
+  border:1px solid #e11d48; background:#e11d48; color:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
 .btn-rose:hover { background:#be123c; }
-.btn-outline.blue { display:inline-flex; align-items:center; border:1px solid #93c5fd; background:#fff; color:#1d4ed8; padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s; }
+
+.btn-outline.blue {
+  display:inline-flex; align-items:center;
+  border:1px solid #93c5fd; background:#fff; color:#1d4ed8;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
+  transition:.15s;
+}
 .btn-outline.blue:hover { background:#eff6ff; }
 
-/* Badges */
-.badge { display:inline-flex; align-items:center; border:1px solid #e5e7eb; padding:.375rem .5rem; border-radius:.5rem; font-size:.75rem; color:#374151; background:#fff; max-width:16rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* 배지 */
+.badge {
+  display:inline-flex; align-items:center; border:1px solid #e5e7eb;
+  padding:.375rem .5rem; border-radius:.5rem; font-size:.75rem; color:#374151; background:#fff;
+  max-width:16rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
 
-/* Table */
+/* 테이블 스타일 (예전) */
 .th { padding:.5rem .75rem; color:#374151; border-bottom:1px solid #e5e7eb; font-weight:600; }
 .th-center { text-align:center; }
 .input { border:1px solid #d1d5db; border-radius:.5rem; padding:.375rem .5rem; outline:none; }
@@ -916,7 +1002,7 @@ onUnmounted(() => {
 .date-input { width:8.6rem; border:1px solid #d1d5db; border-radius:.5rem; padding:.25rem .5rem; outline:none; }
 .date-input:focus { box-shadow:0 0 0 3px rgba(59,130,246,.2); border-color:#60a5fa; }
 
-/* Multiselect dropdowns */
+/* 멀티셀렉트 드롭다운 */
 .select-like { display:inline-flex; align-items:center; height:2.25rem; border:1px solid #d1d5db; border-radius:0.5rem; padding:0 0.75rem; background:#fff; color:#374151; cursor:pointer; user-select:none; }
 .dd {
   position: absolute; left: 0; top: 100%; margin-top: 4px;
@@ -938,6 +1024,8 @@ onUnmounted(() => {
   white-space:nowrap !important;
   opacity:0 !important;
 }
+
+/* 숫자 인풋 좁게 */
 .compact-input {
   width: 5rem !important;
   text-align: center;
