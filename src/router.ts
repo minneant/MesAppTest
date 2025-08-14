@@ -14,6 +14,7 @@ import BomManage from "./pages/BomManage.vue";
 import ProduceFRP from "./pages/ProduceFRP.vue";
 import ProduceFinishing from "./pages/ProduceFinishing.vue";
 import ProducePackaging from "./pages/ProducePackaging.vue";
+import Inventory from "./pages/Inventory.vue";
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -23,6 +24,9 @@ export const router = createRouter({
 
     // 생산실적 조회
     { path: "/production-history", component: ProductionHist },
+
+    // 재고 조회
+    { path: "/inventory", component: Inventory },
 
     // 아이템 관리
     { path: "/bulk-boms", component: BulkBoms },
