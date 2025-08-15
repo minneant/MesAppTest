@@ -7,21 +7,27 @@
       <div class="flex flex-wrap gap-3 items-center">
         <input v-model="filters.search" type="text" placeholder="Search itemId / label" class="input w-56" />
         <label class="flex items-center gap-2 text-sm text-gray-600">
-          <input type="checkbox" v-model="filters.hasBomOnly" /> Only items with BOM
+          <input type="checkbox" v-model="filters.hasStocks" /> Only items with Stocks
         </label>
         <label class="flex items-center gap-2 text-sm text-gray-600">
           <span>Qty ≥</span>
           <input v-model.number="filters.minQty" type="number" class="input h-9 w-20" />
         </label>
         <button class="btn" @click="clearFilters">Clear</button>
+        <button class="btn !ml-4" :disabled="selectedIds.size===0" @click="openShipModal">
+          출하 입력 ({{ selectedIds.size }})
+        </button>
       </div>
     </div>
 
-    <!-- Table wrapper (scroll) -->
+    <!-- Table -->
     <div class="overflow-auto rounded-2xl border bg-white shadow-sm relative">
-      <table class="min-w-[1100px] w-full table-fixed">
+      <table class="min-w-[1150px] w-full table-fixed">
         <thead class="sticky top-0 z-10 bg-gray-50 border-b">
           <tr>
+            <th class="th w-12">
+              <input type="checkbox" :checked="allOnPageSelected" @change="toggleSelectPage($event)" />
+            </th>
             <th class="th w-10"></th>
 
             <!-- itemId -->
@@ -41,7 +47,7 @@
                 <div v-if="headFilter.open==='type'" class="popover" @click.stop>
                   <div class="p-2 text-sm max-h-64 overflow-auto">
                     <label class="flex items-center gap-2 mb-1">
-                      <input type="checkbox" :checked="filters.types.length===0" @change="setTypesAll()" />
+                      <input type="checkbox" :checked="filters.types.length===0" @change="filters.types=[]" />
                       <span>(all)</span>
                     </label>
                     <label v-for="t in typeOptions" :key="t" class="flex items-center gap-2 mb-1">
@@ -61,7 +67,7 @@
                 <div v-if="headFilter.open==='line'" class="popover" @click.stop>
                   <div class="p-2 text-sm max-h-64 overflow-auto">
                     <label class="flex items-center gap-2 mb-1">
-                      <input type="checkbox" :checked="filters.lines.length===0" @change="setLinesAll()" />
+                      <input type="checkbox" :checked="filters.lines.length===0" @change="filters.lines=[]" />
                       <span>(all)</span>
                     </label>
                     <label v-for="l in lineOptions" :key="l" class="flex items-center gap-2 mb-1">
@@ -81,7 +87,7 @@
                 <div v-if="headFilter.open==='inch'" class="popover" @click.stop>
                   <div class="p-2 text-sm max-h-64 overflow-auto">
                     <label class="flex items-center gap-2 mb-1">
-                      <input type="checkbox" :checked="filters.inches.length===0" @change="setInchesAll()" />
+                      <input type="checkbox" :checked="filters.inches.length===0" @change="filters.inches=[]" />
                       <span>(all)</span>
                     </label>
                     <label v-for="i in inchOptions" :key="i" class="flex items-center gap-2 mb-1">
@@ -99,8 +105,8 @@
             </th>
 
             <!-- qty -->
-            <th class="th w-28">
-              <button @click="sortBy('stock')">qty <span class="sort">{{ sortIcon('stock') }}</span></button>
+            <th class="th w-40">
+              <button @click="sortBy('computedQty')">qty (pa + from PL2) <span class="sort">{{ sortIcon('computedQty') }}</span></button>
             </th>
 
             <!-- uom -->
@@ -111,7 +117,7 @@
                 <div v-if="headFilter.open==='uom'" class="popover" @click.stop>
                   <div class="p-2 text-sm">
                     <label class="flex items-center gap-2 mb-1">
-                      <input type="checkbox" :checked="filters.uoms.length===0" @change="setUomsAll()" />
+                      <input type="checkbox" :checked="filters.uoms.length===0" @change="filters.uoms=[]" />
                       <span>(all)</span>
                     </label>
                     <label class="flex items-center gap-2 mb-1">
@@ -135,6 +141,9 @@
             <!-- Main row -->
             <tr class="border-t">
               <td class="px-3 py-2 text-center align-middle">
+                <input type="checkbox" :checked="selectedIds.has(row.itemId)" @change="toggleSelect(row.itemId, $event)" />
+              </td>
+              <td class="px-3 py-2 text-center align-middle">
                 <button @click.stop="onExpand(row.itemId)" class="h-7 w-7 rounded-xl border flex items-center justify-center hover:bg-gray-50">
                   <span :class="expanded[row.itemId] ? 'rotate-90' : ''" class="transition-transform">▶</span>
                 </button>
@@ -150,13 +159,18 @@
                 <template v-if="row.length_mm && row.length_mm > 0">{{ row.length_mm.toLocaleString() }} mm</template>
                 <template v-else>{{ row.uom }}</template>
               </td>
-              <td class="px-3 py-2 text-right tabular-nums">{{ (row.stock ?? 0).toLocaleString() }}</td>
+              <td class="px-3 py-2 text-right tabular-nums">
+                <div class="font-semibold">{{ (row.computedQty ?? 0).toLocaleString() }}</div>
+                <div class="text-[11px] text-gray-500">
+                  pa {{ (row.stockPa ?? 0).toLocaleString() }} + from PL2 {{ (row.fromPl2 ?? 0).toLocaleString() }}
+                </div>
+              </td>
               <td class="px-3 py-2 text-right">{{ row.uom }}</td>
             </tr>
 
-            <!-- Expand row -->
+            <!-- Expand row (BOM auto-depth) -->
             <tr v-if="expanded[row.itemId]" class="bg-gray-50">
-              <td class="px-3 py-3" colspan="8">
+              <td class="px-3 py-3" colspan="9">
                 <div class="text-sm text-gray-600 mb-2">Components (BOM auto-depth)</div>
                 <div class="rounded-xl border bg-white overflow-hidden">
                   <table class="w-full">
@@ -225,13 +239,58 @@
         </div>
       </div>
     </div>
+
+    <!-- Shipping Modal -->
+    <div v-if="ship.open" class="fixed inset-0 bg-black/40 z-30 flex items-center justify-center" @click.self="ship.open=false">
+      <div class="bg-white rounded-2xl shadow-xl w-[min(900px,95vw)] max-h-[85vh] overflow-auto p-5">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-lg font-semibold">출하 입력</div>
+          <button class="btn" @click="ship.open=false">닫기</button>
+        </div>
+
+        <table class="w-full border rounded-xl overflow-hidden">
+          <thead class="bg-gray-50 border-b text-xs text-gray-500">
+            <tr>
+              <th class="px-3 py-2 text-left">itemId</th>
+              <th class="px-3 py-2 text-right">가능수량(표시 qty)</th>
+              <th class="px-3 py-2 text-right">요청 출하 수량</th>
+              <th class="px-3 py-2 text-right">미출하</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="it in ship.entries" :key="it.itemId" class="border-t">
+              <td class="px-3 py-2">
+                <div class="font-medium">{{ it.itemId }}</div>
+                <div class="text-xs text-gray-500">uom: {{ it.uom }}</div>
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums">{{ (it.available ?? 0).toLocaleString() }}</td>
+              <td class="px-3 py-2 text-right">
+                <input type="number" class="input h-9 w-28 text-right" v-model.number="it.toShip" min="0" />
+              </td>
+              <td class="px-3 py-2 text-right tabular-nums text-rose-600">
+                {{ Math.max(0, (it.toShip||0) - (it.feasible||0)).toLocaleString() }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="flex justify-end gap-2 mt-4">
+          <button class="btn" @click="recalcShipFeasible">재계산</button>
+          <button class="btn" :disabled="shipUploading" @click="uploadShipping">{{ shipUploading ? 'Uploading…' : 'Upload' }}</button>
+        </div>
+
+        <div v-if="ship.errors.length" class="mt-3 text-sm text-rose-600">
+          <div v-for="e in ship.errors" :key="e">• {{ e }}</div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { db } from '@/firebase'
-import { collection, query, where, getDocs } from 'firebase/firestore'
+import { collection, query, where, getDocs, getDoc, doc, addDoc, serverTimestamp } from 'firebase/firestore'
 
 /* ---------- Types ---------- */
 interface Item {
@@ -256,7 +315,9 @@ interface RowVM {
   itemId: string
   label?: string
   uom: 'EA' | 'M' | 'ST'
-  stock: number | null
+  stockPa: number | null          // PL1 stock
+  fromPl2: number | null          // buildable from PL2
+  computedQty: number | null      // stockPa + fromPl2
   type: string
   line: string
   inch: string
@@ -275,9 +336,8 @@ interface DeepRow {
 /* ---------- UI State ---------- */
 const filters = reactive({
   search: '',
-  hasBomOnly: false,
+  hasStocks: false,  // qty 0 제외
   minQty: 0,
-  // multi-selects (empty = all)
   types: [] as string[],
   lines: [] as string[],
   inches: [] as string[],
@@ -288,16 +348,30 @@ const headFilter = reactive<{open:''|'type'|'line'|'inch'|'uom'}>({ open: '' })
 function toggleHeadFilter(k:'type'|'line'|'inch'|'uom'){ headFilter.open = (headFilter.open===k ? '' : k) }
 
 /* ---------- Data Stores ---------- */
-const products = ref<Item[]>([])
+const products = ref<Item[]>([])                       // PL1 only
+const itemsById = ref<Map<string, Item>>(new Map())    // meta lookup
 const rows = ref<RowVM[]>([])
 const bomIndex = ref<Map<string, BomEdge[]>>(new Map())
-const stockMap = ref<Map<string, number>>(new Map())
+const stockMap = ref<Map<string, number>>(new Map())   // any item stock
 const deepRowsByParent = ref<Map<string, DeepRow[]>>(new Map())
+const buildablePl2Map = ref<Map<string, number>>(new Map()) // parentId -> buildable from PL2
+
+/* ---------- Selection ---------- */
+const selectedIds = ref<Set<string>>(new Set())
+function toggleSelect(id:string, ev:Event){
+  const on = (ev.target as HTMLInputElement).checked
+  on ? selectedIds.value.add(id) : selectedIds.value.delete(id)
+}
+const allOnPageSelected = computed(()=> pagedRows.value.length>0 && pagedRows.value.every(r=>selectedIds.value.has(r.itemId)))
+function toggleSelectPage(ev:Event){
+  const on = (ev.target as HTMLInputElement).checked
+  pagedRows.value.forEach(r=> on ? selectedIds.value.add(r.itemId) : selectedIds.value.delete(r.itemId))
+}
 
 /* ---------- Sort / Pagination ---------- */
-const sort = reactive<{ key: keyof RowVM | 'length_mm'; dir: 'asc'|'desc' }>({ key:'itemId', dir:'asc' })
-function sortBy(k: keyof RowVM | 'length_mm'){ if (sort.key===k) sort.dir = (sort.dir==='asc'?'desc':'asc'); else { sort.key=k; sort.dir='asc' } }
-function sortIcon(k: keyof RowVM | 'length_mm'){ return sort.key===k ? (sort.dir==='asc'?'▲':'▼') : '' }
+const sort = reactive<{ key: keyof RowVM | 'length_mm' | 'computedQty'; dir: 'asc'|'desc' }>({ key:'itemId', dir:'asc' })
+function sortBy(k: keyof RowVM | 'length_mm' | 'computedQty'){ if (sort.key===k) sort.dir = (sort.dir==='asc'?'desc':'asc'); else { sort.key=k; sort.dir='asc' } }
+function sortIcon(k: keyof RowVM | 'length_mm' | 'computedQty'){ return sort.key===k ? (sort.dir==='asc'?'▲':'▼') : '' }
 
 const page = reactive({ index:0, size:20 })
 function nextPage(){ if(page.index < pageCount.value-1) page.index++ }
@@ -314,21 +388,68 @@ const inchOptions = computed(() => Array.from(new Set(products.value.map(p=>p.in
 
 /* ---------- Helpers ---------- */
 function clearFilters(){
-  filters.search=''; filters.hasBomOnly=false; filters.minQty=0
-  filters.types=[]; filters.lines=[]; filters.inches=[]; filters.uoms=[]
-  headFilter.open=''
+  filters.search=''; filters.hasStocks=false; filters.minQty=0
+  filters.types=[]; filters.lines=[]; filters.inches=[]; filters.uoms=[]; headFilter.open=''
 }
-function setTypesAll(){ filters.types=[] }
-function setLinesAll(){ filters.lines=[] }
-function setInchesAll(){ filters.inches=[] }
-function setUomsAll(){ filters.uoms=[] }
 function formatQty(qty:number, uom?:string){ return `${(qty||0).toLocaleString()}${uom ? ' '+uom : ''}` }
+function yyyymmddLocal(){
+  const d = new Date()
+  const y = d.getFullYear()
+  const m = String(d.getMonth()+1).padStart(2,'0')
+  const day = String(d.getDate()).padStart(2,'0')
+  return `${y}${m}${day}`
+}
+
+/* ---------- ItemId 조립: makeItemId 최우선 사용, 미존재 시 안전 폴백 ---------- */
+function replaceTagInItemId(originalId: string, newTag: string): string {
+  const parts = originalId.split('_')
+  if (parts.length < 2) return originalId + '_' + newTag
+  const last = parts[parts.length-1]
+  const hasLengthSuffix = /^L\d+$/i.test(last)
+  const tagIndex = hasLengthSuffix ? parts.length-2 : parts.length-1
+  parts[tagIndex] = newTag
+  return parts.join('_')
+}
+function buildItemIdFromMeta(meta: Item, newTag: string): string {
+  // 1) 프로젝트 전역/유틸에 이미 있는 makeItemId가 있으면 그걸 사용
+  try {
+    // @ts-ignore
+    if (typeof makeItemId === 'function') {
+      // @ts-ignore
+      return makeItemId(meta.type, meta.line, Number(meta.inch), newTag, Number(meta.length_mm))
+    }
+  } catch {}
+  // 2) 없으면 안전하게 기존 id의 tag만 교체
+  return replaceTagInItemId(meta.itemId, newTag)
+}
+
+/* ---------- Process Tags (masters/processes) ---------- */
+const processTags = ref<Record<string,string>>({})
+async function fetchProcessTags(){
+  // masters/processes: { list: [{name:'Packaging', tag:'pa'}, {name:'Shipping', tag:'sh'}, ...] }
+  const snap = await getDoc(doc(db, 'masters', 'processes'))
+  const data = snap.exists() ? snap.data() as any : {}
+  const list = Array.isArray(data?.list) ? data.list : []
+  const map: Record<string,string> = {}
+  for (const p of list){ if (p?.name && p?.tag) map[p.name] = p.tag }
+  if (!map['Packaging']) map['Packaging'] = 'pa'
+  if (!map['Shipping']) map['Shipping'] = 'sh'
+  processTags.value = map
+}
+function tagOf(name:string){ return processTags.value[name] || name.toLowerCase() }
 
 /* ---------- Firestore ---------- */
+async function fetchAllItemsToMap(){
+  const snap = await getDocs(collection(db,'items'))
+  itemsById.value = new Map(snap.docs.map(d=> {
+    const it = d.data() as Item
+    return [it.itemId, it]
+  }))
+}
 async function fetchFinishedItems(){
   const q = query(collection(db,'items'), where('product_level','==',1), where('active','==',true))
   const snap = await getDocs(q)
-  products.value = snap.docs.map(d=>d.data() as Item)
+  products.value = snap.docs.map(d=> d.data() as Item)
 }
 async function fetchBomFor(parentId:string){
   if (bomIndex.value.has(parentId)) return bomIndex.value.get(parentId)!
@@ -344,6 +465,28 @@ async function computeStock(itemId:string): Promise<number>{
   let s = 0
   snap.forEach(d=>{ const r = d.data() as any; s += (r.isProduction ? 1 : -1) * (r.qty || 0) })
   stockMap.value.set(itemId, s); return s
+}
+
+/* ---------- Buildable (PL2 only) ---------- */
+async function buildableFromPL2(parentId:string): Promise<number>{
+  if (buildablePl2Map.value.has(parentId)) return buildablePl2Map.value.get(parentId)!
+  const edges = await fetchBomFor(parentId)
+  if (!edges.length) { buildablePl2Map.value.set(parentId, 0); return 0 }
+
+  // PL2 자식만 대상으로 병목 계산
+  let minUnits = Number.POSITIVE_INFINITY
+  let anyPl2 = false
+  for (const e of edges){
+    const child = itemsById.value.get(e.childId)
+    if (!child || child.product_level !== 2) continue
+    anyPl2 = true
+    const stock = await computeStock(e.childId)
+    const units = e.qtyPerParent ? Math.floor(stock / e.qtyPerParent) : 0
+    minUnits = Math.min(minUnits, units)
+  }
+  const val = anyPl2 ? (isFinite(minUnits) ? minUnits : 0) : 0
+  buildablePl2Map.value.set(parentId, val)
+  return val
 }
 
 /* ---------- Deep BOM build (auto-depth) ---------- */
@@ -392,13 +535,15 @@ async function buildDeepRows(parentId: string, depthLimit = 99) {
 
 /* ---------- Rows ---------- */
 async function hydrateRow(item:Item): Promise<RowVM>{
-  // 초기 로딩 성능: stock은 지연 계산(null) → 페이지 진입 시만 계산
   return {
     itemId:item.itemId, label:(item as any).label, uom:item.uom,
-    stock: null, type:item.type, line:item.line, inch:item.inch, length_mm:item.length_mm
+    stockPa: null, fromPl2: null, computedQty: null,
+    type:item.type, line:item.line, inch:item.inch, length_mm:item.length_mm
   }
 }
 async function refreshAll(){
+  await fetchProcessTags()
+  await fetchAllItemsToMap()
   await fetchFinishedItems()
   rows.value = await Promise.all(products.value.map(hydrateRow))
 }
@@ -412,46 +557,42 @@ const filteredRows = computed(()=>{
   if (filters.lines.length)  r = r.filter(x => filters.lines.includes(x.line))
   if (filters.inches.length) r = r.filter(x => filters.inches.includes(x.inch))
   if (filters.uoms.length)   r = r.filter(x => filters.uoms.includes(x.uom))
-  // hasBomOnly: 필요한 경우에만 BOM 로드 (페이지 단위로 점진적)
-  if (filters.hasBomOnly) {
-    r = r.filter(x => (bomIndex.value.get(x.itemId)?.length || 0) > 0)
-  }
-  // 정렬
+
+  // qty 0 제외
+  if (filters.hasStocks) r = r.filter(x => ((x.computedQty ?? 0) > 0))
+
   r = [...r].sort((a:any,b:any)=>{
     const k = sort.key as string, av = a[k], bv = b[k]
     if (typeof av === 'number' && typeof bv === 'number') return sort.dir==='asc' ? av-bv : bv-av
     return sort.dir==='asc' ? String(av ?? '').localeCompare(String(bv ?? '')) : String(bv ?? '').localeCompare(String(av ?? ''))
   })
-  // 수량 필터 (stock이 아직 null이면 통과 → 페이지 로딩 시 계산됨)
-  if (filters.minQty) r = r.filter(x => (x.stock ?? Infinity) >= filters.minQty)
+
+  if (filters.minQty) r = r.filter(x => ((x.computedQty ?? 0) >= filters.minQty))
   return r
 })
 const pageCount = computed(()=> Math.max(1, Math.ceil(filteredRows.value.length / page.size)))
 const pagedRows = computed(()=> filteredRows.value.slice(page.index*page.size, (page.index+1)*page.size))
 
-/* ---------- Progressive loading (performance) ---------- */
-// 1) 페이지에 보이는 행들만 stock 병렬 계산 & 캐시
+/* ---------- Progressive loading ---------- */
+async function computeQtyFor(list: RowVM[]) {
+  await Promise.all(list.map(async (row) => {
+    if (row.stockPa === null) row.stockPa = await computeStock(row.itemId)
+    if (row.fromPl2 === null) row.fromPl2 = await buildableFromPL2(row.itemId)
+    row.computedQty = (row.stockPa || 0) + (row.fromPl2 || 0)
+  }))
+}
+async function computeQtyForAll() { await computeQtyFor(rows.value) }
+
 watch(pagedRows, async (list) => {
   await nextTick()
-  await Promise.all(list.map(async (row) => {
-    if (row.stock === null) row.stock = await computeStock(row.itemId)
-  }))
+  await computeQtyFor(list)    // 페이지 단위 지연 계산
 }, { immediate: true })
 
-// 2) hasBomOnly 켜졌을 때만, 아직 모르는 parent의 BOM을 배치로 가져오기 (부하 완화)
-watch(() => filters.hasBomOnly, async (on) => {
-  if (!on) return
-  // 페이지 단위로 점진적 로딩
-  const parents = filteredRows.value.map(r => r.itemId)
-  // 한 번에 너무 많이 쿼리하지 않도록 청크 처리
-  const chunkSize = 20
-  for (let i=0; i<parents.length; i+=chunkSize) {
-    const chunk = parents.slice(i, i+chunkSize)
-    await Promise.all(chunk.map(pid => fetchBomFor(pid)))
-  }
+// "Only items with Stocks"나 수량 조건이 켜지면 즉시 전 품목 선계산 → 필터 바로 반영
+watch(() => [filters.hasStocks, filters.minQty, sort.key === 'computedQty'], async ([has, min, byQty]) => {
+  if (has || (min || 0) > 0 || byQty) await computeQtyForAll()
 })
 
-// 3) 헤더 팝오버 바깥 클릭 시 닫기
 window.addEventListener('click', () => { headFilter.open='' })
 
 /* ---------- Expand orchestration ---------- */
@@ -461,6 +602,159 @@ async function onExpand(parentId:string){
   await buildDeepRows(parentId) // 리프까지
 }
 
+/* ---------- Shipping Modal / Logic ---------- */
+const ship = reactive<{ open:boolean, entries: {itemId:string,uom:string,available:number|undefined,feasible:number|undefined,toShip:number}[], errors:string[] }>({
+  open:false, entries:[], errors:[]
+})
+const shipUploading = ref(false)
+
+function openShipModal(){
+  ship.errors = []
+  ship.entries = Array.from(selectedIds.value).map(id=>{
+    const r = rows.value.find(x=>x.itemId===id)!
+    return { itemId:id, uom:r.uom, available:r.computedQty ?? 0, feasible:r.computedQty ?? 0, toShip:0 }
+  })
+  ship.open = true
+}
+
+async function recalcShipFeasible(){
+  ship.errors = []
+  for (const e of ship.entries){
+    const pa = await computeStock(e.itemId)
+    const from2 = await buildableFromPL2(e.itemId)
+    e.available = pa + from2
+    e.feasible = e.available
+  }
+}
+
+/* ---------- Upload Shipping ---------- */
+async function uploadShipping(){
+  shipUploading.value = true
+  ship.errors = []
+  try{
+    const tagShipping = tagOf('Shipping')
+    const tagPackaging = tagOf('Packaging')
+
+    for (const entry of ship.entries){
+      const want = Math.max(0, entry.toShip || 0)
+      if (!want) continue
+
+      // 최신 재고/병목 재계산
+      const paStock = await computeStock(entry.itemId)
+      const edges = await fetchBomFor(entry.itemId)
+      const pl2Edges = edges.filter(e => (itemsById.value.get(e.childId)?.product_level === 2))
+      const buildable2 = await buildableFromPL2(entry.itemId)
+
+      // 1) Shipping 공정 "생산" 기록 (makeItemId 규칙으로 재조합 + lotId 규칙 itemId+"_YYYYMMDD")
+      const parentMeta = itemsById.value.get(entry.itemId)
+      const shippingItemId = buildItemIdFromMeta(parentMeta!, tagShipping)
+      const shippingLotId = `${shippingItemId}_${yyyymmddLocal()}`
+
+      await addDoc(collection(db,'productions'), {
+        ts: serverTimestamp(),
+        lotId: shippingLotId,
+        itemId: shippingItemId,
+        type: parentMeta?.type ?? '',
+        line: parentMeta?.line ?? '',
+        inch: parentMeta?.inch ?? '',
+        length_mm: parentMeta?.length_mm ?? 0,
+        qty: want,
+        isProduction: true,
+        process: 'Shipping',
+        process_tag: tagShipping,
+        stationId: 'inventory-ui',
+        uom: entry.uom
+      })
+
+      // 2) 포장 부족분 Packaging "생산" (부족분만) — lotId도 itemId+"_YYYYMMDD"
+      const shortage = Math.max(0, want - paStock)
+      const canByPl2 = Math.min(shortage, buildable2)
+      if (canByPl2 > 0){
+        const paLot = `${entry.itemId}_${yyyymmddLocal()}`
+        await addDoc(collection(db,'productions'), {
+          ts: serverTimestamp(),
+          lotId: paLot,
+          itemId: entry.itemId,
+          type: parentMeta?.type ?? '',
+          line: parentMeta?.line ?? '',
+          inch: parentMeta?.inch ?? '',
+          length_mm: parentMeta?.length_mm ?? 0,
+          qty: canByPl2,
+          isProduction: true,
+          process: 'Packaging',
+          process_tag: tagPackaging,
+          stationId: 'inventory-ui',
+          uom: entry.uom
+        })
+        stockMap.value.set(entry.itemId, paStock + canByPl2)
+      }
+
+      // 3) Packaging에 사용된 PL2 소진 (lotId 규칙 동일: child.itemId+"_YYYYMMDD")
+      if (canByPl2 > 0){
+        for (const e of pl2Edges){
+          const need = (e.qtyPerParent || 0) * canByPl2
+          if (need <= 0) continue
+          const childMeta = itemsById.value.get(e.childId)
+          const childLot = `${e.childId}_${yyyymmddLocal()}`
+          await addDoc(collection(db,'productions'), {
+            ts: serverTimestamp(),
+            lotId: childLot,
+            itemId: e.childId,
+            type: childMeta?.type ?? '',
+            line: childMeta?.line ?? '',
+            inch: childMeta?.inch ?? '',
+            length_mm: childMeta?.length_mm ?? 0,
+            qty: need,
+            isProduction: false,
+            process: 'Packaging',
+            process_tag: tagPackaging,
+            stationId: 'inventory-ui',
+            uom: e.uomChild
+          })
+          const cur = await computeStock(e.childId)
+          stockMap.value.set(e.childId, cur - need)
+        }
+      }
+
+      // 4) Shipping 소진 (원본 itemId) — lotId: 원본 itemId+"_YYYYMMDD"
+      const shippingUseLot = `${entry.itemId}_${yyyymmddLocal()}`
+      await addDoc(collection(db,'productions'), {
+        ts: serverTimestamp(),
+        lotId: shippingUseLot,
+        itemId: entry.itemId,
+        type: parentMeta?.type ?? '',
+        line: parentMeta?.line ?? '',
+        inch: parentMeta?.inch ?? '',
+        length_mm: parentMeta?.length_mm ?? 0,
+        qty: want,
+        isProduction: false,
+        process: 'Shipping',
+        process_tag: tagShipping,
+        stationId: 'inventory-ui',
+        uom: entry.uom
+      })
+
+      // 캐시 반영
+      const newPa = (paStock + canByPl2) - want
+      stockMap.value.set(entry.itemId, newPa)
+
+      // 미출하 안내
+      const remaining = want - (Math.min(want, paStock) + canByPl2)
+      if (remaining > 0){
+        ship.errors.push(`${entry.itemId}: 재고/병목으로 ${remaining} 미출하`)
+      }
+    }
+
+    // 화면 수량 재계산 (전체)
+    await computeQtyForAll()
+
+    if (ship.errors.length===0) { ship.open = false; selectedIds.value.clear() }
+  } finally {
+    shipUploading.value = false
+  }
+}
+
+/* ---------- Mount ---------- */
 onMounted(()=>{ refreshAll() })
 </script>
 
