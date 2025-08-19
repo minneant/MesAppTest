@@ -1,9 +1,4 @@
 {
-  "indexes": [],
-  "notes": "초기 템플릿. 업데이트 후 저장하세요.",
-  "schemaVersion": "0.3.0",
-  "updated_at": "250813",
-
   "collections": {
     "bom": {
       "desc": "제품/반제품/원자재 간 연결 bom정리 (관계, 수량등)",
@@ -13,7 +8,7 @@
         "qtyPerParent : number",
         "uomParent: string",
         "uomChild: string",
-        "newField: string"
+        "created_at: timestamp"
       ],
       "key": "key = `${parentId}__${childId}`"
     },
@@ -47,15 +42,15 @@
           "list": "[{ code, label, enabled, order }]"
         },
         "processes": {
-          "list": "[{ code, label, tag, uom?, enabled, order, product_level }]"
+          "list": "[{ code, label, tag, enabled, order, product_level }]"
         },
         "types": {
-          "list": "[{ code, label, enabled, order }]"
+          "list": "[{ code, label, enabled, order, uom }]"
         }
       }
     },
     "productions": {
-      "desc": "공정 실적 로그",
+      "desc": "공정 실적 로그, 생산일땐 isProduction=True, 소진일땐(공정진척, 폐기등) isProduction=False",
       "fields": [
         "ts: Timestamp",
         "lotId: string",
@@ -67,8 +62,9 @@
         "process: string",
         "process_tag: string",
         "qty: number",
+        "stationId: string",
         "uom: 'EA'|'M'|'ST'",
-        "stationId: string"
+        "isProduction: boolean"
       ],
       "key": "(auto)"
     },
@@ -94,5 +90,16 @@
       ],
       "key": "key = `${type}_${line}_${inch}` (권장)"
     }
+  },
+  "indexes": [],
+  "notes": "초기 템플릿. 업데이트 후 저장하세요.",
+  "policies": {
+    "packaging_uom_resolution": "packaging_rules priority asc 매칭 → uom_result/환산 적용.",
+    "uom_base": "대시보드 M 기준. EA/ST 입력 시 환산 캐시(qty_m) 저장."
+  },
+  "schemaVersion": "0.3.0",
+  "updated_at": {
+    "nanoseconds": 228000000,
+    "seconds": 1755107238
   }
 }

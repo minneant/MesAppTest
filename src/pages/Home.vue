@@ -43,7 +43,7 @@
           <RouterLink class="link" to="/bom-manage">BOM 관리</RouterLink>
           <RouterLink class="link" to="/bulk-items">Item 대량 생성</RouterLink>
           <RouterLink class="link" to="/item-manage">Item 관리</RouterLink>
-          <RouterLink class="link" to="/masters-manage">기타태그 관리</RouterLink>
+          <RouterLink class="link" to="/master-manage">기타태그 관리</RouterLink>
         </div>
       </div>
     </div>
