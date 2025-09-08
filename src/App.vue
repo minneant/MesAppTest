@@ -179,6 +179,17 @@ async function handleLogout() {
 .user-chip:hover{ background:#f0fdf4; }
 .user-icon{ font-size:0.95rem; }
 .user-name{ font-weight:600; font-size:0.95rem; }
+/* ✅ 기본: 데스크탑/태블릿에서는 아이콘 + 이름 노출 */
+.user-chip .user-icon { display: inline-block; }
+.user-chip .user-name { display: inline-block; }
+
+/* ✅ 모바일 세로(가로폭 600px 이하)에서는 이름 숨김, 아이콘만 */
+@media (max-width: 600px) {
+  .user-chip { gap: 4px; padding: 2px 4px; } /* 살짝 더 컴팩트하게 */
+  .user-chip .user-name { display: none; }    /* ← 이름 숨김 */
+  .user-chip .user-icon { font-size: 1rem; }  /* 필요시 아이콘 조금 키우기 */
+}
+
 
 /* nav */
 .nav{ display:flex; align-items:center; gap:8px; list-style:none; padding:0; margin:0; }
