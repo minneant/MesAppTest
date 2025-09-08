@@ -1,7 +1,25 @@
 <template>
   <header class="topnav">
     <nav class="navwrap">
-      <div class="brand" @click="$router.push('/')">Home</div>
+      <div class="left-group">
+        <div class="brand" @click="$router.push('/')">Home</div>
+        <!-- ✅ 로그인 사용자 표시 -->
+        <div class="user-chip" v-if="userEmail" @click="handleLogout" title="로그아웃">
+          <!-- ✅ SVG 아이콘 -->
+          <svg xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="1.5"
+              stroke="currentColor"
+              class="w-5 h-5 text-gray-600">
+            <path stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M17.982 18.725A7.488 7.488 0 0 0 12 15.75a7.488 7.488 0 0 0-5.982 2.975m11.963 0a9 9 0 1 0-11.963 0m11.963 0A8.966 8.966 0 0 1 12 21a8.966 8.966 0 0 1-5.982-2.275M15 9.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+          </svg>
+
+          <span class="user-name">{{ displayName }}</span>
+        </div>
+      </div>
 
       <ul class="nav">
         <!-- 1) 생산실적 조회 (단일 링크) -->
@@ -85,11 +103,14 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { getAuth, onAuthStateChanged, signOut } from 'firebase/auth'
 
 const route = useRoute()
+const router = useRouter()
 const openGroup = ref<string|null>(null)
+const userEmail = ref<string|null>(null)
 
 function toggle(name: string){ openGroup.value = (openGroup.value === name) ? null : name }
 function close(){ openGroup.value = null }
@@ -100,8 +121,23 @@ function onDocClick(e: MouseEvent){
   if (nav && e.target instanceof Node && !nav.contains(e.target)) close()
 }
 
-onMounted(()=> document.addEventListener('click', onDocClick, true))
+onMounted(()=> {
+  document.addEventListener('click', onDocClick, true)
+  const auth = getAuth()
+  onAuthStateChanged(auth, (user) => {
+    userEmail.value = user?.email || null
+  })
+})
 onBeforeUnmount(()=> document.removeEventListener('click', onDocClick, true))
+
+const displayName = computed(() => userEmail.value ? userEmail.value.split('@')[0] : '')
+
+async function handleLogout() {
+  if (confirm("로그아웃 하시겠습니까?")) {
+    await signOut(getAuth())
+    router.push("/login")
+  }
+}
 </script>
 
 <style scoped>
@@ -121,13 +157,28 @@ onBeforeUnmount(()=> document.removeEventListener('click', onDocClick, true))
 }
 .navwrap{
   display:flex; align-items:center; justify-content:space-between;
-  gap:12px; padding:10px 16px; /* ✅ 가로 꽉 차게: max-width, margin 제거 */
+  gap:12px; padding:10px 16px;
 }
 .brand{
   font-weight:800; letter-spacing:.3px; cursor:pointer;
-  color:#065f46;  /* deep green */
-  font-size: 1.05rem;
+  color:#065f46; font-size: 1.05rem;
 }
+
+/* ✅ Home + user-chip 묶음 */
+.left-group{
+  display:flex; align-items:center; gap:10px;
+}
+
+/* ✅ 로그인 사용자 표시 */
+.user-chip{
+  display:flex; align-items:center; gap:6px;
+  padding:2px 6px;
+  border-radius:8px;
+  color:#065f46; cursor:pointer; user-select:none;
+}
+.user-chip:hover{ background:#f0fdf4; }
+.user-icon{ font-size:0.95rem; }
+.user-name{ font-weight:600; font-size:0.95rem; }
 
 /* nav */
 .nav{ display:flex; align-items:center; gap:8px; list-style:none; padding:0; margin:0; }
@@ -169,9 +220,6 @@ onBeforeUnmount(()=> document.removeEventListener('click', onDocClick, true))
 }
 .dd-link:hover{ background:#f0fdf4; color:#065f46; }
 
-/* ✅ 페이지 본문: 가로 꽉 채우기 (여백 복원) */
-.content{
-  padding:14px 16px;  /* 좌우 패딩만 유지 */
-  /* max-width 제거, 가운데 정렬 제거 */
-}
+/* 본문 */
+.content{ padding:14px 16px; }
 </style>
