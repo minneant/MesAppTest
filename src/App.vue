@@ -90,7 +90,7 @@
             <li><RouterLink class="dd-link" to="/bom-manage"      @click="close()">BOM 관리</RouterLink></li>
             <li><RouterLink class="dd-link" to="/bulk-items"      @click="close()">Item 대량 생성</RouterLink></li>
             <li><RouterLink class="dd-link" to="/item-manage"     @click="close()">Item 관리</RouterLink></li>
-            <li><RouterLink class="dd-link" to="/masters-manage"  @click="close()">기타태그 관리</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/master-manage"  @click="close()">기타태그 관리</RouterLink></li>
           </ul>
         </li>
       </ul>
