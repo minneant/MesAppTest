@@ -1,9 +1,10 @@
-<script setup lang="ts"> 
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted, watch, type Ref } from "vue";
 import { db } from "@/firebase";
 import {
   collection, getDocs, orderBy, query, limit,
-  doc, setDoc, getDoc, deleteDoc, serverTimestamp, writeBatch
+  doc, setDoc, getDoc, deleteDoc, serverTimestamp, writeBatch,
+  startAfter, where, startAt, endAt, updateDoc, arrayUnion
 } from "firebase/firestore";
 import { useMasters } from "@/composables/useMasters";
 
@@ -12,13 +13,12 @@ type ItemRow = {
   itemId: string;
   type: string;
   line: string;
-  inch: number;            // UI에서는 number로 보유(정렬/필터 편의)
+  inch: number;
   process_tag: string;
   process?: string;
   length_mm: number;
   created_at?: any;
 
-  /* 신규/유지 필드 */
   product_level?: number;
   uom?: 'EA'|'M'|'ST';
   active?: boolean;
@@ -27,13 +27,9 @@ type ItemRow = {
 
 /* ---------------- Masters from DB ---------------- */
 const { types, lines, processes } = useMasters();
-
-// codes
 const TYPE_CODES = computed(() => (types.value || []).map(t => t.code));
 const LINE_CODES = computed(() => (lines.value || []).map(l => l.code));
 const PROCESS_CODES = computed(() => (processes.value || []).map(p => p.code));
-
-/* 마스터 맵 */
 const TYPE_UOM_MAP = computed<Record<string, string|undefined>>(() => {
   const m: Record<string, string|undefined> = {};
   (types.value || []).forEach((t:any) => m[t.code] = t.uom);
@@ -56,7 +52,7 @@ const rows = ref<ItemRow[]>([]);
 const loading = ref(false);
 const errorMsg = ref("");
 
-/* Filters (UI 상태) — 데이터 기반 옵션 유지 */
+/* Filters (UI 상태) */
 const fTypes = ref<string[]>([]);
 const fLines = ref<string[]>([]);
 const fTags = ref<string[]>([]);
@@ -98,46 +94,63 @@ const editCache = ref<ItemRow | null>(null);
 /* CSV input */
 const fileInput = ref<HTMLInputElement | null>(null);
 
-/* ---------------- Init ---------------- */
-onMounted(load);
-async function load() {
-  loading.value = true; errorMsg.value = "";
+/* ---------------- Paging / Server-side querying ---------------- */
+const PAGE_SIZE = 1000;    // 첫 로딩 1000개
+const hasMore = ref(true);
+const lastCursor = ref<any>(null);
+const serverSideApplied = ref<Record<string, boolean>>({}); // 어떤 필터를 서버로 보냈는지 표시
+
+/* ------------- Facet meta (전 컬렉션 기준 드롭다운 옵션) ------------- */
+const FACETS = ref<{
+  types: string[]; lines: string[]; processes: string[]; tags: string[];
+  inches: number[]; lengths: number[];
+} | null>(null);
+
+async function loadFacets() {
   try {
-    const qy = query(collection(db, "items"), orderBy("itemId"), limit(8000));
-    const snap = await getDocs(qy);
-    rows.value = snap.docs.map(d => {
+    const d = await getDoc(doc(db, "meta", "items_facets"));
+    if (d.exists()) {
       const x = d.data() as any;
-      // DB의 inch는 문자열일 수 있으므로 숫자로 변환해 UI에 보유
-      const inchNum = Number(x.inch ?? x.inch_str ?? x.inchNum);
-      return {
-        ...x,
-        inch: Number.isFinite(inchNum) ? inchNum : 0,
-      } as ItemRow;
-    });
-  } catch (e: any) {
-    errorMsg.value = e?.message ?? String(e);
-  } finally {
-    loading.value = false;
-  }
+      FACETS.value = {
+        types: x.types || [],
+        lines: x.lines || [],
+        processes: x.processes || [],
+        tags: x.tags || [],
+        inches: (x.inches || []).map((n:any)=>Number(n)).filter(Number.isFinite).sort((a:number,b:number)=>a-b),
+        lengths: (x.lengths || []).map((n:any)=>Number(n)).filter(Number.isFinite).sort((a:number,b:number)=>a-b),
+      };
+    } else {
+      FACETS.value = { types:[], lines:[], processes:[], tags:[], inches:[], lengths:[] };
+    }
+  } catch (e:any) { console.error(e); }
+}
+
+/* ---------------- Init ---------------- */
+onMounted(async () => {
+  await loadFacets();
+  await loadInitial(); // 빠른 첫 화면: 1000개만
+});
+async function loadInitial() {
+  loading.value = true; errorMsg.value = ""; selectedIds.value.clear();
+  try {
+    const qy = query(collection(db, "items"), orderBy("itemId"), limit(PAGE_SIZE));
+    const snap = await getDocs(qy);
+    rows.value = snap.docs.map(d => mapDoc(d.data()));
+    lastCursor.value = snap.docs[snap.docs.length - 1] ?? null;
+    hasMore.value = snap.size === PAGE_SIZE;
+  } catch (e:any) { errorMsg.value = e?.message ?? String(e); }
+  finally { loading.value = false; }
 }
 
 /* ---------------- Helpers ---------------- */
 const lc = (s?: string) => (s ?? "").toLowerCase();
-
-/** UI number → DB/ID용 문자열(불필요한 .0 제거) */
-function inchToStr(n:number) {
-  if (Number.isInteger(n)) return String(n);
-  return String(n).replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.0+$/,'');
-}
-
-/** itemId 생성 규칙(길이 suffix는 >0 && !==1000 일 때만) */
+function inchToStr(n:number) { if (Number.isInteger(n)) return String(n); return String(n).replace(/(\.\d*?[1-9])0+$/,'$1').replace(/\.0+$/,''); }
 function buildItemId(type: string, line: string, inchN: number, tag: string, length_mm: number) {
   const inch = inchToStr(inchN);
   let id = `${type}_${line}_${inch}_${tag}`;
   if (length_mm > 0 && length_mm !== 1000) id += `_${length_mm}`;
   return id;
 }
-
 function createdAtMs(v:any): number | null {
   if (!v) return null;
   if (typeof v?.toDate === "function") return v.toDate().getTime();
@@ -154,8 +167,15 @@ function fmtCreatedShort(v:any) {
 function formatCreatedAt(v:any) {
   const ms = createdAtMs(v); return ms==null ? "" : new Date(ms).toISOString();
 }
+function mapDoc(x:any): ItemRow {
+  const inchNum = Number(x.inch ?? x.inch_str ?? x.inchNum);
+  return {
+    ...x,
+    inch: Number.isFinite(inchNum) ? inchNum : 0,
+  } as ItemRow;
+}
 
-/* ---------- 동적 옵션(데이터 기반) ---------- */
+/* ---------- 동적 옵션(데이터 기반) + Facet 우선 ---------- */
 type FilterField = "type"|"line"|"tag"|"process"|"inch"|"length";
 function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
   const sinceMs = fCreatedSince.value ? new Date(fCreatedSince.value).getTime() : null;
@@ -175,42 +195,14 @@ function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
   if (sTxt && !lc(r.itemId).includes(sTxt)) return false;
   return true;
 }
+const fTypeOpts    = computed(() => (FACETS.value?.types?.length ? FACETS.value!.types : Array.from(new Set(rows.value.filter(r => passesExcept(r,"type")).map(r => r.type))).sort()));
+const fLineOpts    = computed(() => (FACETS.value?.lines?.length ? FACETS.value!.lines : Array.from(new Set(rows.value.filter(r => passesExcept(r,"line")).map(r => r.line))).sort()));
+const fTagOpts     = computed(() => (FACETS.value?.tags?.length ? FACETS.value!.tags : Array.from(new Set(rows.value.filter(r => passesExcept(r,"tag")).map(r => r.process_tag))).sort()));
+const fProcessOpts = computed(() => (FACETS.value?.processes?.length ? FACETS.value!.processes : Array.from(new Set(rows.value.filter(r => passesExcept(r,"process")).map(r => r.process).filter(Boolean) as string[])).sort()));
+const fInchOpts    = computed(() => (FACETS.value?.inches?.length ? FACETS.value!.inches : Array.from(new Set(rows.value.filter(r => passesExcept(r,"inch")).map(r => r.inch))).sort((a,b)=>a-b)));
+const fLengthOpts  = computed(() => (FACETS.value?.lengths?.length ? FACETS.value!.lengths : Array.from(new Set(rows.value.filter(r => passesExcept(r,"length")).map(r => r.length_mm))).sort((a,b)=>a-b)));
 
-const fTypeOpts = computed(() =>
-  Array.from(new Set(rows.value.filter(r => passesExcept(r,"type")).map(r => r.type))).sort()
-);
-const fLineOpts = computed(() =>
-  Array.from(new Set(rows.value.filter(r => passesExcept(r,"line")).map(r => r.line))).sort()
-);
-const fTagOpts = computed(() =>
-  Array.from(new Set(rows.value.filter(r => passesExcept(r,"tag")).map(r => r.process_tag))).sort()
-);
-const fProcessOpts = computed(() =>
-  Array.from(new Set(rows.value.filter(r => passesExcept(r,"process")).map(r => r.process).filter(Boolean) as string[])).sort()
-);
-const fInchOpts = computed(() =>
-  Array.from(new Set(rows.value.filter(r => passesExcept(r,"inch")).map(r => r.inch))).sort((a,b)=>a-b)
-);
-const fLengthOpts = computed(() =>
-  Array.from(new Set(rows.value.filter(r => passesExcept(r,"length")).map(r => r.length_mm))).sort((a,b)=>a-b)
-);
-
-/* (생성/수정용 datalist: 마스터 + 데이터 union) */
-const dlTypeOptions = computed(() => {
-  const s = new Set<string>(TYPE_CODES.value);
-  rows.value.forEach(r => s.add(r.type));
-  return Array.from(s).sort();
-});
-const dlLineOptions = computed(() => {
-  const s = new Set<string>(LINE_CODES.value);
-  rows.value.forEach(r => s.add(r.line));
-  return Array.from(s).sort();
-});
-
-/* 요약 텍스트 */
-const lengthSummary = computed(() =>
-  fLens.value.length ? (fLens.value.length <= 3 ? fLens.value.join(", ") : `${fLens.value.length}개 선택`) : "전체"
-);
+const lengthSummary = computed(() => fLens.value.length ? (fLens.value.length <= 3 ? fLens.value.join(", ") : `${fLens.value.length}개 선택`) : "전체");
 
 /* Reset */
 function resetAll() {
@@ -232,30 +224,125 @@ watch([fProcessOpts], () => { fProcesses.value = pruneMulti(fProcesses.value, ne
 watch([fInchOpts], () => { fInches.value = pruneMulti(fInches.value, new Set(fInchOpts.value)) as number[]; });
 watch([fLengthOpts], () => { fLens.value = pruneMulti(fLens.value, new Set(fLengthOpts.value)) as number[]; });
 
+/* ---------------- Server-side filter apply & pagination ---------------- */
+function pushMulti<T>(name: string, values: T[], push: (cond:any)=>void) {
+  if (!values?.length) return false;
+  if (values.length === 1) { push(where(name, "==", values[0] as any)); serverSideApplied.value[name]=true; return true; }
+  if (values.length <= 10) { push(where(name, "in", values.slice(0,10) as any)); serverSideApplied.value[name]=true; return true; }
+  serverSideApplied.value[name]=false;
+  return false;
+}
+
+function buildServerQueryParts() {
+  serverSideApplied.value = {};
+  const parts:any[] = [];
+  let orderKey: "itemId" | "created_at" = "itemId";
+  let addPrefix = false;
+  let prefixValue = "";
+
+  // equal/in 가능한 것들
+  pushMulti("type", fTypes.value, c=>parts.push(c));
+  pushMulti("line", fLines.value, c=>parts.push(c));
+  pushMulti("process_tag", fTags.value, c=>parts.push(c));
+  pushMulti("process", fProcesses.value, c=>parts.push(c));
+  pushMulti("inch", fInches.value, c=>parts.push(c));
+  pushMulti("length_mm", fLens.value, c=>parts.push(c));
+
+  // created_at 하한
+  const sinceMs = fCreatedSince.value ? new Date(fCreatedSince.value).getTime() : null;
+  if (sinceMs!=null) {
+    parts.push(where("created_at", ">=", new Date(sinceMs)));
+    serverSideApplied.value["created_at"]=true;
+    orderKey = "created_at";
+  }
+
+  // itemId prefix 검색
+  const s = (fSearch.value || "").trim();
+  if (s && !s.includes("*") && !s.includes("?")) {
+    addPrefix = true;
+    prefixValue = s;
+    orderKey = "itemId";
+  }
+
+  return { parts, orderKey, addPrefix, prefixValue };
+}
+
+async function applyFiltersServerSide() {
+  loading.value = true; errorMsg.value=""; selectedIds.value.clear();
+  try {
+    const { parts, orderKey, addPrefix, prefixValue } = buildServerQueryParts();
+    let base = query(collection(db,"items"), orderBy(orderKey), ...(parts as any), limit(PAGE_SIZE));
+    if (addPrefix) {
+      const upper = prefixValue + "\uf8ff";
+      base = query(collection(db,"items"), orderBy("itemId"), ...(parts as any), startAt(prefixValue), endAt(upper), limit(PAGE_SIZE));
+    }
+    const snap = await getDocs(base);
+    rows.value = snap.docs.map(d => mapDoc(d.data()));
+    lastCursor.value = snap.docs[snap.docs.length-1] ?? null;
+    hasMore.value = snap.size === PAGE_SIZE;
+  } catch (e:any) { errorMsg.value = e?.message ?? String(e); }
+  finally { loading.value = false; }
+}
+
+async function loadMore() {
+  if (!hasMore.value || !lastCursor.value) return;
+  loading.value = true;
+  try {
+    const { parts, orderKey, addPrefix, prefixValue } = buildServerQueryParts();
+    let qy = query(collection(db,"items"), orderBy(orderKey), ...(parts as any), startAfter(lastCursor.value), limit(PAGE_SIZE));
+    if (addPrefix) {
+      const upper = prefixValue + "\uf8ff";
+      qy = query(collection(db,"items"), orderBy("itemId"), ...(parts as any), startAt(prefixValue), endAt(upper), startAfter(lastCursor.value), limit(PAGE_SIZE));
+    }
+    const snap = await getDocs(qy);
+    rows.value.push(...snap.docs.map(d => mapDoc(d.data())));
+    lastCursor.value = snap.docs[snap.docs.length-1] ?? null;
+    hasMore.value = snap.size === PAGE_SIZE;
+  } catch (e:any) { errorMsg.value = e?.message ?? String(e); }
+  finally { loading.value = false; }
+}
+
+/* ---------------- Facet upsert (생성/수정/업로드 시) ---------------- */
+async function upsertFacetsFromItem(p: {
+  type?: string; line?: string; process?: string; process_tag?: string;
+  inch?: number|string; length_mm?: number;
+}) {
+  const refm = doc(db, "meta", "items_facets");
+  const inchNum = Number(typeof p.inch === "string" ? Number(p.inch) : p.inch);
+  const lenNum  = Number(p.length_mm ?? 0);
+  const payload:any = {};
+  if (p.type)        payload.types     = arrayUnion(p.type);
+  if (p.line)        payload.lines     = arrayUnion(p.line);
+  if (p.process)     payload.processes = arrayUnion(p.process);
+  if (p.process_tag) payload.tags      = arrayUnion(p.process_tag);
+  if (Number.isFinite(inchNum)) payload.inches  = arrayUnion(inchNum);
+  if (Number.isFinite(lenNum))  payload.lengths = arrayUnion(lenNum);
+  if (Object.keys(payload).length) {
+    try { await updateDoc(refm, payload); }
+    catch { await setDoc(refm, payload, { merge: true }); }
+  }
+}
+
 /* ---------------- Create ---------------- */
 watch(createProc, (p) => { createTag.value = p ? tagOf(p) : ""; });
-
 const computedCreateId = computed(() => {
   if (!createType.value || !createLine.value || createInch.value == null || !createTag.value) return "";
   const L = Number(createLen.value ?? 0);
   return buildItemId(createType.value, createLine.value, Number(createInch.value), createTag.value, L);
 });
-
 function openCreate() {
   showCreate.value = true;
-  if (createLen.value == null) createLen.value = 1000; // 기본값 유지(아이디엔 안 붙음)
+  if (createLen.value == null) createLen.value = 1000;
 }
-
 async function createItem() {
   if (!computedCreateId.value) { alert("필수값을 모두 입력하세요."); return; }
-
   const inchStr = inchToStr(Number(createInch.value!));
   const L = Number(createLen.value ?? 0);
   const payload: any = {
     itemId: computedCreateId.value,
     type: createType.value,
     line: createLine.value,
-    inch: inchStr, // DB 저장은 문자열
+    inch: inchStr,
     process_tag: createTag.value,
     process: createProc.value || undefined,
     length_mm: L,
@@ -265,52 +352,42 @@ async function createItem() {
     product_level: PROCESS_LEVEL_MAP.value[createProc.value] ?? undefined,
     active: true,
   };
-
   const ref = doc(db, "items", payload.itemId);
   const exist = await getDoc(ref);
   if (exist.exists() && !confirm("같은 itemId가 있습니다. 덮어쓸까요?")) return;
   await setDoc(ref, payload, { merge: true });
 
-  // UI rows에는 inch를 number로 재주입
-  rows.value.unshift({
-    ...(payload as ItemRow),
-    inch: Number(createInch.value),
-    created_at: new Date(),
-  });
+  rows.value.unshift({ ...(payload as ItemRow), inch: Number(createInch.value), created_at: new Date() });
+  await upsertFacetsFromItem(payload);
+  await loadFacets();
 
   showCreate.value = false;
-  createType.value = createLine.value = "";
-  createProc.value = createTag.value = "";
-  createInch.value = null; createLen.value = null;
+  createType.value = createLine.value = ""; createProc.value = createTag.value = ""; createInch.value = null; createLen.value = null;
 }
 
 /* ---------------- Edit ---------------- */
 function startEdit(r: ItemRow) { editingId.value = r.itemId; editCache.value = { ...r }; }
 function cancelEdit() { editingId.value = null; editCache.value = null; }
-
 function onEditProcessChange() {
   if (!editCache.value) return;
   const p = editCache.value.process || "";
   editCache.value.process_tag = tagOf(p) || editCache.value.process_tag;
   editCache.value.product_level = PROCESS_LEVEL_MAP.value[p] ?? editCache.value.product_level;
 }
-
 const computedEditId = computed(() => {
   const e = editCache.value; if (!e) return "";
   return buildItemId(e.type, e.line, Number(e.inch), e.process_tag, Number(e.length_mm));
 });
-
 async function saveEdit(orig: ItemRow) {
   if (!editCache.value) return;
   const e = editCache.value, newId = computedEditId.value;
   if (!newId) { alert("필수값을 확인하세요."); return; }
-
   const inchStr = inchToStr(Number(e.inch));
   const newPayload: any = {
     itemId: newId,
     type: e.type,
     line: e.line,
-    inch: inchStr,                        // DB에는 문자열
+    inch: inchStr,
     process_tag: e.process_tag,
     process: e.process || undefined,
     length_mm: Number(e.length_mm),
@@ -322,7 +399,6 @@ async function saveEdit(orig: ItemRow) {
       : e.product_level,
     active: (orig.active ?? true),
   };
-
   if (newId === orig.itemId) {
     await setDoc(doc(db, "items", newId), newPayload, { merge: true });
     const idx = rows.value.findIndex(x => x.itemId === orig.itemId);
@@ -336,6 +412,8 @@ async function saveEdit(orig: ItemRow) {
     const idx = rows.value.findIndex(x => x.itemId === orig.itemId);
     if (idx >= 0) rows.value.splice(idx, 1, { ...e, ...newPayload, inch: Number(e.inch) });
   }
+  await upsertFacetsFromItem(newPayload);
+  await loadFacets();
   editingId.value = null; editCache.value = null;
 }
 
@@ -360,12 +438,11 @@ async function deleteSelected() {
   if (!ids.length) { alert("선택된 항목이 없습니다."); return; }
   if (!confirm(`선택 ${ids.length}건을 삭제할까요?`)) return;
   await deleteByIds(ids);
-  await load();
+  await applyFiltersServerSide(); // 최신 조회 반영
   selectedIds.value.clear();
 }
 
 /* ---------------- CSV export/import ---------------- */
-/* 내보내기: 새 스키마 포함 */
 function toCSV(records: ItemRow[]) {
   const headers = ["itemId","type","line","inch","process","process_tag","length_mm","product_level","uom","active","created_at","updated_at"];
   const esc = (v:any) => {
@@ -390,7 +467,7 @@ function exportSelectedCSV() {
   download(`items_selected_${new Date().toISOString().slice(0,19)}.csv`, toCSV(selectedRows.value));
 }
 
-/* 업로드: 새/구 헤더 모두 허용 */
+/* 업로드 (기존 로직 그대로) */
 function parseCSV(text: string): string[][] {
   const out:string[][]=[]; let cell=""; let row:string[]=[]; let q=false;
   for (let i=0;i<text.length;i++){
@@ -434,6 +511,12 @@ async function onCSVChoose(e: Event) {
     await batch.commit(); buf = [];
   };
 
+  // Facet 누적
+  const facetAcc = {
+    types: new Set<string>(), lines: new Set<string>(), processes: new Set<string>(),
+    tags: new Set<string>(), inches: new Set<number>(), lengths: new Set<number>()
+  };
+
   for (const c of arr) {
     const col = (i:number)=> (c[i] ?? "").trim();
     if (mode === "new") {
@@ -461,14 +544,21 @@ async function onCSVChoose(e: Event) {
 
       const itemId = buildItemId(type, line, Number.isFinite(inchNum)?inchNum:0, process_tag, length_mm);
       buf.push({
-        itemId,
-        type, line, inch: inchStr || inchToStr(Number(inchNum)),
+        itemId, type, line, inch: inchStr || inchToStr(Number(inchNum)),
         process, process_tag, length_mm,
         product_level, uom, active,
         created_at: created, updated_at: updated,
       });
 
-    } else { // old
+      // facet 누적
+      facetAcc.types.add(type); facetAcc.lines.add(line);
+      if (process) facetAcc.processes.add(process);
+      facetAcc.tags.add(process_tag);
+      const _inchN = Number.isFinite(inchNum)? inchNum : Number(inchStr);
+      if (Number.isFinite(_inchN)) facetAcc.inches.add(_inchN as number);
+      facetAcc.lengths.add(length_mm);
+
+    } else {
       const [,_type,_line,_inch,_proc,_tag,_len,_created] = c;
       const type = col(1), line = col(2);
       const inchNum = Number(col(3));
@@ -486,27 +576,53 @@ async function onCSVChoose(e: Event) {
       buf.push({
         itemId, type, line, inch: inchToStr(inchNum),
         process, process_tag, length_mm,
-        // 마스터 기반 값 자동 반영
         uom: (TYPE_UOM_MAP.value[type] as any) || 'EA',
         product_level: process ? PROCESS_LEVEL_MAP.value[process] : undefined,
         active: true,
         created_at: created, updated_at: serverTimestamp(),
       });
+
+      facetAcc.types.add(type); facetAcc.lines.add(line);
+      if (process) facetAcc.processes.add(process);
+      facetAcc.tags.add(process_tag);
+      if (Number.isFinite(inchNum)) facetAcc.inches.add(inchNum);
+      facetAcc.lengths.add(length_mm);
     }
 
     if (buf.length >= batchSize) await flush();
   }
   await flush();
-  await load(); input.value = "";
+
+  // Facet 병합 반영
+  await updateDoc(doc(db,"meta","items_facets"), {
+    types:     arrayUnion(...Array.from(facetAcc.types)),
+    lines:     arrayUnion(...Array.from(facetAcc.lines)),
+    processes: arrayUnion(...Array.from(facetAcc.processes)),
+    tags:      arrayUnion(...Array.from(facetAcc.tags)),
+    inches:    arrayUnion(...Array.from(facetAcc.inches)),
+    lengths:   arrayUnion(...Array.from(facetAcc.lengths)),
+  }).catch(async ()=> {
+    await setDoc(doc(db,"meta","items_facets"), {
+      types: Array.from(facetAcc.types),
+      lines: Array.from(facetAcc.lines),
+      processes: Array.from(facetAcc.processes),
+      tags: Array.from(facetAcc.tags),
+      inches: Array.from(facetAcc.inches),
+      lengths: Array.from(facetAcc.lengths),
+    }, { merge:true });
+  });
+
+  await loadFacets();
+  await applyFiltersServerSide();
+  input.value = "";
   alert(`CSV 업로드 완료`);
 }
 function triggerCSVUpload(){ fileInput.value?.click(); }
 
-/* ---------------- Sort ---------------- */
+/* ---------------- Sort (클라이언트 정렬) ---------------- */
 type SortKey = "itemId" | "type" | "line" | "inch" | "process_tag" | "process" | "length_mm" | "created_at";
 const sortKey = ref<SortKey>("itemId");
 const sortDir = ref<"asc" | "desc">("asc");
-
 function toggleSort(k: SortKey) {
   if (sortKey.value === k) {
     sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
@@ -533,6 +649,68 @@ const sorted = computed(() => {
     return String(va).localeCompare(String(vb)) * dir;
   });
 });
+
+/* ---------------- Admin: Facet 재빌드 / 전체 CSV 다운로드 ---------------- */
+async function rebuildFacetsAll() {
+  if (!confirm("전수 스캔으로 Facet을 재구성합니다. 시간이 걸릴 수 있어요.")) return;
+  const acc = {
+    types:new Set<string>(), lines:new Set<string>(), processes:new Set<string>(),
+    tags:new Set<string>(), inches:new Set<number>(), lengths:new Set<number>()
+  };
+
+  let last:any = null;
+  const page = 1000;
+  while (true) {
+    const qy = last
+      ? query(collection(db,"items"), orderBy("itemId"), startAfter(last), limit(page))
+      : query(collection(db,"items"), orderBy("itemId"), limit(page));
+    const snap = await getDocs(qy);
+    if (snap.empty) break;
+    snap.docs.forEach(d => {
+      const x = d.data() as any;
+      if (x.type) acc.types.add(x.type);
+      if (x.line) acc.lines.add(x.line);
+      if (x.process) acc.processes.add(x.process);
+      if (x.process_tag) acc.tags.add(x.process_tag);
+      const inchN = Number(x.inch ?? x.inch_str ?? x.inchNum);
+      if (Number.isFinite(inchN)) acc.inches.add(inchN);
+      const lenN = Number(x.length_mm ?? 0);
+      if (Number.isFinite(lenN)) acc.lengths.add(lenN);
+    });
+    last = snap.docs[snap.docs.length - 1];
+    if (snap.size < page) break;
+  }
+
+  await setDoc(doc(db,"meta","items_facets"), {
+    types: Array.from(acc.types).sort(),
+    lines: Array.from(acc.lines).sort(),
+    processes: Array.from(acc.processes).sort(),
+    tags: Array.from(acc.tags).sort(),
+    inches: Array.from(acc.inches).sort((a,b)=>a-b),
+    lengths: Array.from(acc.lengths).sort((a,b)=>a-b),
+  }, { merge:true });
+
+  await loadFacets();
+  alert("Facet 재빌드 완료");
+}
+
+async function downloadAllItemsCSV() {
+  if (!confirm("items 전체 컬렉션을 CSV로 내려받습니다. 진행할까요?")) return;
+  const buf: ItemRow[] = [];
+  let last:any = null;
+  const page = 1000;
+  while (true) {
+    const qy = last
+      ? query(collection(db,"items"), orderBy("itemId"), startAfter(last), limit(page))
+      : query(collection(db,"items"), orderBy("itemId"), limit(page));
+    const snap = await getDocs(qy);
+    if (snap.empty) break;
+    buf.push(...snap.docs.map(d => mapDoc(d.data())));
+    last = snap.docs[snap.docs.length - 1];
+    if (snap.size < page) break;
+  }
+  download(`items_all_${new Date().toISOString().slice(0,19)}.csv`, toCSV(buf));
+}
 
 /* ---------------- Close <details> on outside click / ESC ---------------- */
 function closeAllDetails(e?: Event) {
@@ -561,9 +739,11 @@ onUnmounted(() => {
     <header class="sticky top-0 z-30 bg-white/90 backdrop-blur pb-2 flex items-center justify-between">
       <h2 class="text-lg font-semibold">Item 관리</h2>
       <div class="flex items-center gap-2">
-        <span class="text-sm text-gray-600">표시: <b>{{ filtered.length }}</b> / 전체 {{ rows.length }}</span>
+        <span class="text-sm text-gray-600">표시: <b>{{ filtered.length }}</b> / 로드 {{ rows.length }}개</span>
 
-        <button type="button" class="btn" @click="load" :disabled="loading">새로고침</button>
+        <button type="button" class="btn" @click="loadInitial" :disabled="loading">초기 1,000개</button>
+        <button type="button" class="btn" @click="applyFiltersServerSide" :disabled="loading">필터 적용(서버 조회)</button>
+        <button type="button" class="btn" @click="loadMore" :disabled="loading || !hasMore">더 보기</button>
 
         <button type="button" class="btn-outline blue"
                 @click="exportSelectedCSV" :disabled="!selectedRows.length">
@@ -579,6 +759,10 @@ onUnmounted(() => {
         <button type="button" class="btn-blue" @click="openCreate">+ 새 항목</button>
 
         <button type="button" class="btn" @click="resetAll">필터 초기화</button>
+
+        <!-- Admin: Facet 재빌드 & 전체 CSV -->
+        <button type="button" class="btn" @click="rebuildFacetsAll">Facet 재빌드</button>
+        <button type="button" class="btn" @click="downloadAllItemsCSV">CSV 전체 다운로드</button>
       </div>
     </header>
 
@@ -602,59 +786,48 @@ onUnmounted(() => {
         </colgroup>
 
         <thead>
-          <!-- 1줄 헤더 (정렬) -->
           <tr class="sticky top-0 z-20 bg-gray-50 h-12 select-none">
             <th class="th th-center">
               <input type="checkbox" :checked="allChecked" @change="allChecked = ($event.target as HTMLInputElement).checked"/>
             </th>
 
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('itemId')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('itemId')">
               itemId <span v-if="sortKey==='itemId'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('type')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('type')">
               type <span v-if="sortKey==='type'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('line')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('line')">
               line <span v-if="sortKey==='line'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('inch')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('inch')">
               inch <span v-if="sortKey==='inch'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('process_tag')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('process_tag')">
               tag <span v-if="sortKey==='process_tag'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('process')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('process')">
               process <span v-if="sortKey==='process'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('length_mm')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('length_mm')">
               length (mm) <span v-if="sortKey==='length_mm'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
-            <th class="th th-center cursor-pointer hover:bg-gray-100"
-                @click="toggleSort('created_at')">
+            <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('created_at')">
               created_at <span v-if="sortKey==='created_at'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
 
             <th class="th th-center">액션</th>
           </tr>
 
-          <!-- 2줄: 필터 (옵션 동적) -->
+          <!-- 2줄: 필터 -->
           <tr class="sticky top-12 z-10 bg-white border-b">
             <th></th>
 
-            <!-- itemId 검색 -->
             <th class="filter-cell">
-              <input v-model="fSearch" placeholder="itemId 검색(부분)"
+              <input v-model="fSearch" placeholder="itemId prefix 검색(옵션)"
                      class="input w-[16rem] mx-auto block"/>
             </th>
 
-            <!-- type -->
             <th class="filter-cell">
               <details class="relative inline-block">
                 <summary class="select-like mx-auto">{{ fTypes.length ? fTypes.join(", ") : "전체" }}</summary>
@@ -666,7 +839,6 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- line -->
             <th class="filter-cell">
               <details class="relative inline-block">
                 <summary class="select-like mx-auto">{{ fLines.length ? fLines.join(", ") : "전체" }}</summary>
@@ -678,7 +850,6 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- inch -->
             <th class="filter-cell">
               <details class="relative inline-block">
                 <summary class="select-like mx-auto">{{ fInches.length ? fInches.join(", ") : "전체" }}</summary>
@@ -690,7 +861,6 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- tag -->
             <th class="filter-cell">
               <details class="relative inline-block">
                 <summary class="select-like mx-auto">{{ fTags.length ? fTags.join(", ") : "전체" }}</summary>
@@ -702,7 +872,6 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- process -->
             <th class="filter-cell">
               <details class="relative inline-block">
                 <summary class="select-like mx-auto">{{ fProcesses.length ? fProcesses.join(", ") : "전체" }}</summary>
@@ -714,7 +883,6 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- length (mm) -->
             <th class="filter-cell">
               <details class="relative inline-block">
                 <summary class="select-like mx-auto">{{ lengthSummary }}</summary>
@@ -726,10 +894,8 @@ onUnmounted(() => {
               </details>
             </th>
 
-            <!-- created_at: '이후' -->
             <th class="filter-cell">
-              <input type="datetime-local" v-model="fCreatedSince"
-                     class="input w-[12rem] mx-auto block"/>
+              <input type="datetime-local" v-model="fCreatedSince" class="input w-[12rem] mx-auto block"/>
             </th>
 
             <th></th>
@@ -770,35 +936,21 @@ onUnmounted(() => {
 
             <template v-else>
               <td class="px-3 py-2"><input type="checkbox" disabled/></td>
-
-              <!-- itemId (computed preview) -->
               <td class="px-3 py-2 font-mono text-[12.5px] no-wrap">{{ computedEditId }}</td>
-
-              <!-- type: select -->
               <td class="px-3 py-2">
                 <select v-model="editCache!.type" class="input w-full">
-                  <option v-for="t in dlTypeOptions" :key="t" :value="t">{{ t }}</option>
+                  <option v-for="t in TYPE_CODES" :key="t" :value="t">{{ t }}</option>
                 </select>
               </td>
-
-              <!-- line: select -->
               <td class="px-3 py-2">
                 <select v-model="editCache!.line" class="input w-full">
-                  <option v-for="l in dlLineOptions" :key="l" :value="l">{{ l }}</option>
+                  <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
                 </select>
               </td>
-
-              <!-- inch -->
               <td class="px-3 py-2">
                 <input type="number" step="0.25" v-model.number="editCache!.inch" class="input compact-input"/>
               </td>
-
-              <!-- tag 표시만 -->
-              <td class="px-3 py-2 text-center text-gray-400">
-                {{ editCache!.process_tag }}
-              </td>
-
-              <!-- process: select (DB 마스터 기준) + tag/product_level 동기화 -->
+              <td class="px-3 py-2 text-center text-gray-400">{{ editCache!.process_tag }}</td>
               <td class="px-3 py-2">
                 <div class="proc-wrap">
                   <select v-model="editCache!.process" @change="onEditProcessChange" class="input">
@@ -807,16 +959,10 @@ onUnmounted(() => {
                   </select>
                 </div>
               </td>
-
-              <!-- length -->
               <td class="px-3 py-2">
                 <input type="number" v-model.number="editCache!.length_mm" class="input w-full"/>
               </td>
-
-              <!-- created_at -->
               <td class="px-3 py-2 text-center no-wrap">{{ fmtCreatedShort(editCache!.created_at) }}</td>
-
-              <!-- actions -->
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
                   <button type="button" class="btn-blue" @click="saveEdit(r)">저장</button>
@@ -828,142 +974,43 @@ onUnmounted(() => {
         </tbody>
       </table>
 
-      <!-- datalist -->
-      <datalist id="typeList">
-        <option v-for="t in dlTypeOptions" :key="t" :value="t" />
-      </datalist>
-      <datalist id="lineList">
-        <option v-for="l in dlLineOptions" :key="l" :value="l" />
-      </datalist>
-    </div>
-
-    <!-- Create modal -->
-    <div v-if="showCreate" class="fixed inset-0 z-[9999] bg-black/40 flex items-start justify-center p-6">
-      <div class="w-[min(720px,92vw)] max-h-[80vh] overflow-auto rounded-xl border border-gray-200 bg-white p-4 shadow-2xl">
-        <div class="flex items-center justify-between mb-2">
-          <h3 class="text-base font-semibold">새 항목 추가</h3>
-          <button type="button" class="btn" @click="showCreate = false">닫기</button>
-        </div>
-
-        <div class="grid grid-cols-2 gap-3 my-2">
-          <label class="text-sm text-gray-600">type
-            <input v-model="createType" list="typeList" class="mt-1 input w-full" />
-          </label>
-          <label class="text-sm text-gray-600">line
-            <input v-model="createLine" list="lineList" class="mt-1 input w-full" />
-          </label>
-
-          <label class="text-sm text-gray-600">inch
-            <input type="number" step="0.25" v-model.number="createInch" class="mt-1 input w-full"/>
-          </label>
-
-          <label class="text-sm text-gray-600">process
-            <select v-model="createProc" class="mt-1 input w-full">
-              <option value="" disabled>선택</option>
-              <option v-for="p in PROCESS_CODES" :key="p" :value="p">{{ p }}</option>
-            </select>
-          </label>
-
-          <label class="text-sm text-gray-600">tag
-            <input v-model="createTag" readonly class="mt-1 input w-full bg-gray-50 border-gray-200"/>
-          </label>
-
-          <label class="text-sm text-gray-600">length(mm)
-            <input type="number" v-model.number="createLen" class="mt-1 input w-full"/>
-          </label>
-        </div>
-
-        <p class="font-mono text-sm">생성될 itemId: <b>{{ computedCreateId || "(필수값 입력 필요)" }}</b></p>
-
-        <div class="flex justify-end gap-2 mt-3">
-          <button type="button" class="btn-blue" @click="createItem">추가</button>
-          <button type="button" class="btn" @click="showCreate = false">닫기</button>
-        </div>
-      </div>
+      <datalist id="typeList"><option v-for="t in TYPE_CODES" :key="t" :value="t" /></datalist>
+      <datalist id="lineList"><option v-for="l in LINE_CODES" :key="l" :value="l" /></datalist>
     </div>
   </section>
 </template>
 
 <style scoped>
 :where(button, input, select) { all: revert; font: inherit; }
-
-/* 공통 버튼 */
-.btn {
-  display:inline-flex; align-items:center;
-  border:1px solid #d1d5db; background:#fff;
-  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
-  transition:.15s;
-}
-.btn:hover { background:#f9fafb; }
-.btn:active { transform:scale(.98); }
-
-.btn-blue {
-  display:inline-flex; align-items:center;
-  border:1px solid #2563eb; background:#2563eb; color:#fff;
-  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
-  transition:.15s;
-}
+.btn { display:inline-flex; align-items:center; border:1px solid #d1d5db; background:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s;}
+.btn:hover { background:#f9fafb; } .btn:active { transform:scale(.98); }
+.btn-blue { display:inline-flex; align-items:center; border:1px solid #2563eb; background:#2563eb; color:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s;}
 .btn-blue:hover { background:#1d4ed8; }
-
-.btn-rose {
-  display:inline-flex; align-items:center;
-  border:1px solid #e11d48; background:#e11d48; color:#fff;
-  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
-  transition:.15s;
-}
+.btn-rose { display:inline-flex; align-items:center; border:1px solid #e11d48; background:#e11d48; color:#fff;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s;}
 .btn-rose:hover { background:#be123c; }
-
-.btn-outline.blue {
-  display:inline-flex; align-items:center;
-  border:1px solid #93c5fd; background:#fff; color:#1d4ed8;
-  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem;
-  transition:.15s;
-}
+.btn-outline.blue { display:inline-flex; align-items:center; border:1px solid #93c5fd; background:#fff; color:#1d4ed8;
+  padding:.375rem .75rem; border-radius:.5rem; font-size:.875rem; transition:.15s;}
 .btn-outline.blue:hover { background:#eff6ff; }
 
-/* 헤더/필터 가운데 정렬 */
 .th { padding:.5rem .75rem; color:#374151; border-bottom:1px solid #e5e7eb; font-weight:600; }
 .th-center { text-align:center; }
 .filter-cell { padding:.5rem .75rem; text-align:center; }
 
-/* 인풋/셀렉트 */
 .input { border:1px solid #d1d5db; border-radius:.5rem; padding:.375rem .5rem; outline:none; box-sizing:border-box; }
 .input:focus { box-shadow:0 0 0 3px rgba(59,130,246,.2); border-color:#60a5fa; }
 
-/* 멀티셀렉트 드롭다운 */
 .select-like { display:inline-flex; align-items:center; height:2.25rem; border:1px solid #d1d5db; border-radius:0.5rem; padding:0 0.75rem; background:#fff; color:#374151; cursor:pointer; user-select:none; }
-.dd {
-  position: absolute; left: 0; top: 100%; margin-top: 4px;
-  width: 14rem; max-height: 14rem; overflow: auto;
-  background: #fff; border: 1px solid #e5e7eb; border-radius: .75rem;
-  padding: .5rem; box-shadow: 0 10px 24px rgba(0,0,0,.08); z-index: 50;
-}
+.dd { position: absolute; left: 0; top: 100%; margin-top: 4px; width: 14rem; max-height: 14rem; overflow: auto;
+  background: #fff; border: 1px solid #e5e7eb; border-radius: .75rem; padding: .5rem; box-shadow: 0 10px 24px rgba(0,0,0,.08); z-index: 50; }
 
-/* badges & layout helpers */
-.tag-badge {
-  display:inline-flex; align-items:center; justify-content:center;
-  padding:.25rem .5rem; border-radius:.5rem;
-  background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;
-  font-size:.8rem; white-space:nowrap;
-}
+.uom-badge { display:inline-flex; align-items:center; justify-content:center; padding:.25rem .5rem; border-radius:.5rem;
+  background:#f3f4f6; color:#374151; border:1px solid #e5e7eb; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace; font-size:.8rem; white-space:nowrap; }
 .no-wrap { white-space:nowrap; }
 
-/* 파일 input 완전 숨김 */
-.file-hidden{
-  position:absolute !important;
-  left:-9999px !important;
-  width:1px !important;
-  height:1px !important;
-  overflow:hidden !important;
-  clip:rect(0 0 0 0) !important;
-  white-space:nowrap !important;
-  opacity:0 !important;
-}
-
-/* inch 입력칸 슬림 + 중앙정렬 */
+.file-hidden{ position:absolute !important; left:-9999px !important; width:1px !important; height:1px !important; overflow:hidden !important; clip:rect(0 0 0 0) !important; white-space:nowrap !important; opacity:0 !important; }
 .compact-input { width: 6rem !important; text-align: center; }
-
-/* process 셀렉트 */
 .proc-wrap { display: inline-flex; align-items: center; gap: .5rem; flex-wrap: wrap; justify-content: center; }
 </style>
