@@ -23,6 +23,8 @@ type ItemRow = {
   uom?: 'EA'|'M'|'ST';
   active?: boolean;
   updated_at?: any;
+
+  has_bom?: boolean;   // ← BOM 상태(백필/자동 세팅으로 들어옴)
 };
 
 /* ---------------- Masters from DB ---------------- */
@@ -61,6 +63,8 @@ const fInches = ref<number[]>([]);
 const fLens = ref<number[]>([]);
 const fCreatedSince = ref<string>("");
 const fSearch = ref<string>("");
+/* BOM 상태 필터: all | missing | present */
+const fBom = ref<'all'|'missing'|'present'>('all');
 
 /* Multi-select */
 const selectedIds = ref<Set<string>>(new Set());
@@ -176,7 +180,7 @@ function mapDoc(x:any): ItemRow {
 }
 
 /* ---------- 동적 옵션(데이터 기반) + Facet 우선 ---------- */
-type FilterField = "type"|"line"|"tag"|"process"|"inch"|"length";
+type FilterField = "type"|"line"|"tag"|"process"|"inch"|"length"|"bom";
 function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
   const sinceMs = fCreatedSince.value ? new Date(fCreatedSince.value).getTime() : null;
   const sTxt = lc(fSearch.value);
@@ -187,6 +191,12 @@ function passesExcept(r: ItemRow, exclude: FilterField | null): boolean {
   if (exclude !== "process" && fProcesses.value.length && !fProcesses.value.includes(r.process ?? "")) return false;
   if (exclude !== "inch"    && fInches.value.length    && !fInches.value.includes(r.inch)) return false;
   if (exclude !== "length"  && fLens.value.length      && !fLens.value.includes(r.length_mm)) return false;
+
+  // BOM 상태 필터
+  if (exclude !== "bom") {
+    if (fBom.value === "missing" && r.has_bom === true) return false;
+    if (fBom.value === "present" && r.has_bom !== true) return false;
+  }
 
   if (sinceMs!=null) {
     const ms = createdAtMs(r.created_at);
@@ -209,6 +219,7 @@ function resetAll() {
   fTypes.value = []; fLines.value = []; fTags.value = []; fProcesses.value = []; fInches.value = [];
   fSearch.value = ""; fLens.value = [];
   fCreatedSince.value = "";
+  fBom.value = 'all';
 }
 
 /* 사용 불가해진 선택값 정리 */
@@ -225,6 +236,7 @@ watch([fInchOpts], () => { fInches.value = pruneMulti(fInches.value, new Set(fIn
 watch([fLengthOpts], () => { fLens.value = pruneMulti(fLens.value, new Set(fLengthOpts.value)) as number[]; });
 
 /* ---------------- Server-side filter apply & pagination ---------------- */
+// 서버 사이드에는 has_bom 조건을 보내지 않고(복잡한 인덱싱 회피), 클라에서만 거름
 function pushMulti<T>(name: string, values: T[], push: (cond:any)=>void) {
   if (!values?.length) return false;
   if (values.length === 1) { push(where(name, "==", values[0] as any)); serverSideApplied.value[name]=true; return true; }
@@ -444,7 +456,7 @@ async function deleteSelected() {
 
 /* ---------------- CSV export/import ---------------- */
 function toCSV(records: ItemRow[]) {
-  const headers = ["itemId","type","line","inch","process","process_tag","length_mm","product_level","uom","active","created_at","updated_at"];
+  const headers = ["itemId","type","line","inch","process","process_tag","length_mm","product_level","uom","active","created_at","updated_at","has_bom"];
   const esc = (v:any) => {
     const s = String(v ?? "");
     return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
@@ -452,7 +464,7 @@ function toCSV(records: ItemRow[]) {
   const lines = records.map(r => [
     r.itemId, r.type, r.line, inchToStr(r.inch), r.process ?? "", r.process_tag, r.length_mm,
     r.product_level ?? "", r.uom ?? "", r.active ?? "",
-    formatCreatedAt(r.created_at), formatCreatedAt(r.updated_at)
+    formatCreatedAt(r.created_at), formatCreatedAt(r.updated_at), r.has_bom === true ? "true" : ""
   ].map(esc).join(","));
   return [headers.join(","), ...lines].join("\n");
 }
@@ -467,7 +479,7 @@ function exportSelectedCSV() {
   download(`items_selected_${new Date().toISOString().slice(0,19)}.csv`, toCSV(selectedRows.value));
 }
 
-/* 업로드 (기존 로직 그대로) */
+/* 업로드 (기존 로직) */
 function parseCSV(text: string): string[][] {
   const out:string[][]=[]; let cell=""; let row:string[]=[]; let q=false;
   for (let i=0;i<text.length;i++){
@@ -550,7 +562,6 @@ async function onCSVChoose(e: Event) {
         created_at: created, updated_at: updated,
       });
 
-      // facet 누적
       facetAcc.types.add(type); facetAcc.lines.add(line);
       if (process) facetAcc.processes.add(process);
       facetAcc.tags.add(process_tag);
@@ -780,6 +791,7 @@ onUnmounted(() => {
           <col style="width:5.5rem"/>
           <col style="width:7rem"/>
           <col style="width:10rem"/>
+          <col style="width:6rem"/>   <!-- BOM -->
           <col style="width:9rem"/>
           <col style="width:13rem"/>
           <col style="width:8.5rem"/>
@@ -812,6 +824,7 @@ onUnmounted(() => {
             <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('length_mm')">
               length (mm) <span v-if="sortKey==='length_mm'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
+            <th class="th th-center">BOM</th>
             <th class="th th-center cursor-pointer hover:bg-gray-100" @click="toggleSort('created_at')">
               created_at <span v-if="sortKey==='created_at'">{{ sortDir==='asc'?'▲':'▼' }}</span>
             </th>
@@ -894,6 +907,15 @@ onUnmounted(() => {
               </details>
             </th>
 
+            <!-- BOM 상태 필터 -->
+            <th class="filter-cell">
+              <select v-model="fBom" class="input w-[8rem] mx-auto block">
+                <option value="all">전체</option>
+                <option value="missing">BOM 없음</option>
+                <option value="present">BOM 있음</option>
+              </select>
+            </th>
+
             <th class="filter-cell">
               <input type="datetime-local" v-model="fCreatedSince" class="input w-[12rem] mx-auto block"/>
             </th>
@@ -925,6 +947,14 @@ onUnmounted(() => {
                   <span class="uom-badge">{{ r.uom || 'EA' }}</span>
                 </template>
               </td>
+
+              <!-- BOM 표시(Y/N) -->
+              <td class="px-3 py-2 text-center">
+                <span class="uom-badge" :class="r.has_bom===true ? 'bg-green-50' : 'bg-red-50'">
+                  {{ r.has_bom === true ? 'Y' : 'N' }}
+                </span>
+              </td>
+
               <td class="px-3 py-2 text-center">{{ fmtCreatedShort(r.created_at) }}</td>
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">
@@ -962,6 +992,11 @@ onUnmounted(() => {
               <td class="px-3 py-2">
                 <input type="number" v-model.number="editCache!.length_mm" class="input w-full"/>
               </td>
+
+              <td class="px-3 py-2 text-center">
+                <span class="uom-badge">{{ (editCache!.has_bom===true) ? 'Y' : 'N' }}</span>
+              </td>
+
               <td class="px-3 py-2 text-center no-wrap">{{ fmtCreatedShort(editCache!.created_at) }}</td>
               <td class="px-3 py-2">
                 <div class="flex gap-2 justify-center">

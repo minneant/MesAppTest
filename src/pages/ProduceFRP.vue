@@ -153,8 +153,8 @@ import { useMasters } from "@/composables/useMasters"
 /** ─────────────────────────────────────────────
  * 고정 타입(같은 화면에서 Coating/Mold 전환)
  * ───────────────────────────────────────────── */
-type TType = 'ST2' | 'HD2' | 'END' | 'CON'
-const TYPES: TType[] = ['ST2','HD2','END','CON']
+type TType = 'ST2' | 'HD2' | 'END' | 'CON' | 'EL2'
+const TYPES: TType[] = ['ST2','HD2','END','CON','EL2']
 
 /** masters: lines/processes */
 const { lines, processes } = useMasters()
@@ -165,7 +165,8 @@ const PROCESS_CODE_BY_TYPE: Record<TType, string> = {
   ST2: 'FRP_Coating',
   HD2: 'FRP_Coating',
   END: 'FRP_Mold',
-  CON: 'FRP_Mold'
+  CON: 'FRP_Mold',
+  EL2: 'FRP_Coating',      // ⬅ 엘보우는 코팅 공정으로 처리
 }
 /** processes 마스터에서 code→tag 맵 (fc/fm 폴백 포함) */
 const TAG_BY_PROCESS_CODE = computed<Record<string, string>>(()=>{
@@ -337,7 +338,7 @@ function addOrBump(inch: number){
   else rows.value.unshift(newRow)
 }
 function onTypeChange(row:Row){
-  row.length_mm = defaultLenFor(row.type) // ST2=1000, 나머지=0
+  row.length_mm = defaultLenFor(row.type) // ST2=1000, 나머지(HD2/END/CON/EL2)=0
   syncItemId(row)
 }
 function syncItemId(row:Row){ row.itemId = makeItemId(row.type, row.line, row.inch, row.length_mm) }

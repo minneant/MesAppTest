@@ -16,6 +16,8 @@ import ProduceFinishing from "./pages/ProduceFinishing.vue";
 import ProducePackaging from "./pages/ProducePackaging.vue";
 import Inventory from "./pages/Inventory.vue";
 import Login from "./pages/Login.vue";
+import AdminSeed from "./pages/AdminSeed.vue";
+import ProduceGlue from "./pages/ProduceGlue.vue"; 
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -36,6 +38,8 @@ export const router = createRouter({
     { path: "/schema-inspector", component: SchemaInspector, name: "schema-inspector" },
     { path: "/schema-editor", component: SchemaEditor, name: "schema-editor" },
     { path: "/:pathMatch(.*)*", redirect: "/" },
+    { path: "/admin-seed", component: AdminSeed, name: "admin-seed" },
+    { path: "/produce-glue", component: ProduceGlue, name: "produce-glue" }
   ],
 });
 

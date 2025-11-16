@@ -2,6 +2,7 @@
 import { db } from "@/firebase";
 import {
   collection, doc, setDoc, getDocs, writeBatch, serverTimestamp,
+  query, where, documentId
 } from "firebase/firestore";
 import { ref } from "vue";
 
@@ -123,7 +124,89 @@ async function patchItemsAddFamilyUom() {
   append("✔ items 패치 완료\n");
 }
 
+/* ---------------- bom -> items.has_bom=true (product_level < 3) ---------------- */
+/**
+ * 1) bom 컬렉션 전수 스캔 → parentId 수집
+ * 2) items에서 해당 parentId 문서들 중 product_level < 3만 선별
+ * 3) has_bom: true 로 일괄 머지 (450건 단위 커밋)
+ */
+async function markItemsHasBomFromBomLT3() {
+  try {
+    append("▶ bom 스캔 → items.has_bom=true 시작 (product_level < 4)");
 
+    // 1) 모든 bom 문서에서 parentId 수집
+    const bomSnap = await getDocs(collection(db, "bom"));
+    const parentIds = new Set<string>();
+    for (const d of bomSnap.docs) {
+      const data = d.data() as any;
+      const pid = data?.parentId;
+      if (typeof pid === "string" && pid.trim().length > 0) {
+        parentIds.add(pid.trim());
+      }
+    }
+    const allParentIds = Array.from(parentIds);
+    append(` - BOM 부모 후보 수: ${allParentIds.length}`);
+
+    if (allParentIds.length === 0) {
+      append("✔ 대상 parentId가 없습니다.\n");
+      return;
+    }
+
+    // 2) items에서 product_level < 3 인 parent만 선별 (documentId() in []는 10개 제한이므로 청크)
+    const CHUNK = 10;
+    const targets: string[] = [];
+    for (let i = 0; i < allParentIds.length; i += CHUNK) {
+      const chunk = allParentIds.slice(i, i + CHUNK);
+      const qRef = query(
+        collection(db, "items"),
+        where(documentId(), "in", chunk)
+      );
+      const snap = await getDocs(qRef);
+      snap.forEach(d => {
+        const data = d.data() as any;
+        const lvl = Number(data?.product_level);
+        if (Number.isFinite(lvl) && lvl < 4) {
+          targets.push(d.id);
+        }
+      });
+      append(`  · 청크 ${Math.floor(i/CHUNK)+1}: 조회 ${chunk.length} → 대상 누적 ${targets.length}`);
+    }
+    append(` - 최종 대상 아이템 수(product_level<3): ${targets.length}`);
+
+    if (targets.length === 0) {
+      append("✔ 업데이트할 대상 없음\n");
+      return;
+    }
+
+    // 3) has_bom:true로 배치 업데이트 (450건 단위 커밋)
+    let batch = writeBatch(db);
+    let ops = 0, updated = 0;
+    const now = serverTimestamp();
+
+    for (const pid of targets) {
+      batch.set(doc(db, "items", pid), {
+        has_bom: true,
+        updated_at: now,
+      }, { merge: true });
+      ops++; updated++;
+
+      if (ops === 450) {
+        await batch.commit();
+        append(` - batch commit (누적 ${updated})`);
+        batch = writeBatch(db);
+        ops = 0;
+      }
+    }
+
+    if (ops > 0) {
+      await batch.commit();
+      append(` - 마지막 commit (총 ${updated})`);
+    }
+    append("✔ bom → items.has_bom 패치 완료\n");
+  } catch (err: any) {
+    append(`에러: ${err?.message || String(err)}`);
+  }
+}
 </script>
 
 <template>
@@ -143,6 +226,9 @@ async function patchItemsAddFamilyUom() {
       </button>
       <button class="px-4 py-2 rounded bg-amber-600 text-white" @click="patchItemsAddFamilyUom">
         4) items에 family/uom 기본값 추가
+      </button>
+      <button class="px-4 py-2 rounded bg-emerald-600 text-white" @click="markItemsHasBomFromBomLT3">
+        5) bom 스캔 → items.has_bom = true (product_level 0~3)
       </button>
     </div>
 

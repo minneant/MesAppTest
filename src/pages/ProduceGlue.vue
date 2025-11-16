@@ -1,54 +1,48 @@
 <template>
   <div class="p-6 max-w-7xl mx-auto space-y-6">
-    <h1 class="text-2xl font-semibold">Finishing (Pipe / P Covers) Production</h1>
+    <h1 class="text-2xl font-semibold">Glue (Elbow) Production</h1>
 
     <!-- 상단 선택 -->
     <div class="flex flex-wrap justify-center gap-6 bg-white border rounded-xl p-4 shadow-sm">
       <div class="flex items-center gap-2">
         <span class="text-sm text-gray-600">Type</span>
-        <select v-model="form.type" @change="onTypeChange" class="px-3 py-2 border rounded-lg bg-white hover:bg-gray-50">
+        <select
+          v-model="form.type"
+          @change="onTypeChange"
+          class="px-3 py-2 border rounded-lg bg-white hover:bg-gray-50"
+        >
           <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
         </select>
       </div>
 
       <div class="flex items-center gap-2">
         <span class="text-sm text-gray-600">Line</span>
-        <select v-model="form.line" class="px-3 py-2 border rounded-lg bg-white hover:bg-gray-50">
+        <select
+          v-model="form.line"
+          class="px-3 py-2 border rounded-lg bg-white hover:bg-gray-50"
+        >
           <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
         </select>
       </div>
 
       <div class="flex items-center gap-2">
         <span class="text-sm text-gray-600">Process</span>
-
-        <!-- 엘보우 타입이면 공정 선택 가능 -->
-        <template v-if="isElbowType(form.type)">
-          <select
-            v-model="formProcess"
-            @change="onFormProcessChange"
-            class="px-3 py-2 border rounded-lg bg-white hover:bg-gray-50 w-56"
-          >
-            <option v-for="p in processOptionsFor(form.type)" :key="p" :value="p">
-              {{ p }}
-            </option>
-          </select>
-        </template>
-
-        <!-- 나머지 타입은 그대로 readonly -->
-        <template v-else>
-          <input
-            :value="mappedProcess"
-            readonly
-            class="px-3 py-2 border rounded-lg bg-gray-50 text-gray-700 w-56"
-          />
-        </template>
-
+        <!-- Glue 공정 고정 -->
+        <input
+          :value="mappedProcess"
+          readonly
+          class="px-3 py-2 border rounded-lg bg-gray-50 text-gray-700 w-56"
+        />
         <span class="text-xs text-gray-500">tag: {{ mappedTag || '—' }}</span>
       </div>
 
       <div class="flex items-center gap-2">
         <span class="text-sm text-gray-600">Station</span>
-        <input v-model="stationId" placeholder="TAB-01" class="px-3 py-2 border rounded-lg bg-white" />
+        <input
+          v-model="stationId"
+          placeholder="GL-01"
+          class="px-3 py-2 border rounded-lg bg-white"
+        />
       </div>
     </div>
 
@@ -104,12 +98,20 @@
           <tbody>
             <tr v-for="(row, idx) in rows" :key="row.uid" class="border-t">
               <td class="px-3 py-2">
-                <select v-model="row.type" @change="onRowTypeChange(row)" class="px-2 py-1 border rounded bg-white">
+                <select
+                  v-model="row.type"
+                  @change="onRowTypeChange(row)"
+                  class="px-2 py-1 border rounded bg-white"
+                >
                   <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
                 </select>
               </td>
               <td class="px-3 py-2">
-                <select v-model="row.line" @change="syncItemId(row)" class="px-2 py-1 border rounded bg-white">
+                <select
+                  v-model="row.line"
+                  @change="syncItemId(row)"
+                  class="px-2 py-1 border rounded bg-white"
+                >
                   <option v-for="l in LINE_CODES" :key="l" :value="l">{{ l }}</option>
                 </select>
               </td>
@@ -123,44 +125,42 @@
                 />
               </td>
               <td class="px-3 py-2">
+                <!-- 엘보우는 길이 개념 없어서 0 고정 & 수정 불가 -->
                 <input
                   type="number"
                   v-model.number="row.length_mm"
-                  class="px-2 py-1 border rounded w-24 text-center"
-                  @input="syncItemId(row)"
+                  class="px-2 py-1 border rounded w-24 text-center bg-gray-50 text-gray-500"
+                  disabled
                 />
               </td>
               <td class="px-3 py-2">
                 <div class="inline-flex items-center gap-2">
-                  <button class="px-3 py-1 border rounded hover:bg-gray-100" @click="row.qty=Math.max(1,row.qty-1)">−</button>
-                  <input type="number" min="1" v-model.number="row.qty" class="px-2 py-1 border rounded w-16 text-center" />
-                  <button class="px-3 py-1 border rounded hover:bg-gray-100" @click="row.qty+=1">＋</button>
+                  <button
+                    class="px-3 py-1 border rounded hover:bg-gray-100"
+                    @click="row.qty=Math.max(1,row.qty-1)"
+                  >−</button>
+                  <input
+                    type="number"
+                    min="1"
+                    v-model.number="row.qty"
+                    class="px-2 py-1 border rounded w-16 text-center"
+                  />
+                  <button
+                    class="px-3 py-1 border rounded hover:bg-gray-100"
+                    @click="row.qty+=1"
+                  >＋</button>
                 </div>
               </td>
               <td class="px-3 py-2">
-                <!-- 엘보우는 공정 선택 가능 -->
-                <template v-if="isElbowType(row.type)">
-                  <select
-                    v-model="row.process"
-                    @change="onRowProcessChange(row)"
-                    class="px-2 py-1 border rounded bg-white text-xs"
-                  >
-                    <option v-for="p in processOptionsFor(row.type)" :key="p" :value="p">
-                      {{ p }}
-                    </option>
-                  </select>
-                  <span class="ml-1 text-xs text-gray-500">({{ row.process_tag }})</span>
-                </template>
-
-                <!-- 나머지는 readonly 표시 -->
-                <template v-else>
-                  <span class="px-2 py-1 rounded bg-gray-100 border text-xs">{{ row.process }}</span>
-                  <span class="ml-1 text-xs text-gray-500">({{ row.process_tag }})</span>
-                </template>
+                <span class="px-2 py-1 rounded bg-gray-100 border text-xs">{{ row.process }}</span>
+                <span class="ml-1 text-xs text-gray-500">({{ row.process_tag }})</span>
               </td>
               <td class="px-3 py-2 font-mono text-xs break-all">{{ row.itemId }}</td>
               <td class="px-3 py-2">
-                <button class="px-3 py-1 border rounded bg-red-50 hover:bg-red-100 text-red-700" @click="remove(idx)">삭제</button>
+                <button
+                  class="px-3 py-1 border rounded bg-red-50 hover:bg-red-100 text-red-700"
+                  @click="remove(idx)"
+                >삭제</button>
               </td>
             </tr>
             <tr v-if="rows.length === 0">
@@ -179,7 +179,8 @@
                text-white bg-emerald-600 border-emerald-600 shadow-sm
                transition-all duration-150 hover:bg-emerald-700 hover:border-emerald-700
                active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-        @click="upload">
+        @click="upload"
+      >
         {{ uploading ? 'Uploading…' : 'Upload' }}
       </button>
 
@@ -189,7 +190,8 @@
                bg-white border-gray-300 text-gray-800 shadow-sm
                transition-all duration-150 hover:bg-gray-50 active:scale-95
                disabled:opacity-50 disabled:cursor-not-allowed"
-        @click="clearAll">
+        @click="clearAll"
+      >
         초기화
       </button>
     </div>
@@ -221,56 +223,31 @@ const LINE_CODES = computed(() => {
 })
 
 /* ---- 상수 ---- */
-type TType = 'ST1'|'ST2'|'HD1'|'HD2'|'END'|'CON'|'EL1'|'EL2'
-const TYPES: TType[] = ['ST1','ST2','HD1','HD2','END','CON','EL1','EL2']
+const GLUE_PROCESS_CODE = 'Glue'  // processes.code 가 'Glue', tag 'gl' 이라고 가정
 
-// 엘보우 타입 판별
-function isElbowType(t: TType) {
-  return t === 'EL1' || t === 'EL2'
-}
+type TType = 'EL1' | 'EL2'
+const TYPES: TType[] = ['EL1', 'EL2']
 
-// 타입 → 기본 공정 매핑 (기존 로직 유지, 엘보우는 기본 Cutting_Elbow)
-const TYPE_TO_PROCESS: Record<TType, string> = {
-  ST1: 'InnerP_Finishing',
-  ST2: 'OuterP_Finishing',
-  HD1: 'InnerP_Finishing',
-  HD2: 'OuterP_Finishing',
-  END: 'FRP(Mold)_Finishing',
-  CON: 'FRP(Mold)_Finishing',
-  EL1: 'Cutting_Elbow',
-  EL2: 'Cutting_Elbow',
-}
-
-// 엘보우 타입별 선택 가능한 공정 옵션
-function processOptionsFor(type: TType): string[] {
-  if (type === 'EL1') return ['Cutting_Elbow', 'InnerP_Finishing']
-  if (type === 'EL2') return ['Cutting_Elbow', 'OuterP_Finishing']
-  return [TYPE_TO_PROCESS[type]]
-}
-
-// 타입 → 기본 길이(mm)
+// 타입 → 기본 길이(mm) (엘보우는 길이 개념 X → 0)
 function defaultLenOf(type: TType): number {
-  return (type === 'ST1' || type === 'ST2') ? 1000 : 0
+  return 0
 }
 
 // 타입 → UOM (masters.types에 uom 있으면 반영)
-const TYPE_UOM_MAP = computed<Record<string,string>>(()=>{
+const TYPE_UOM_MAP = computed<Record<string,string>>(() => {
   const m: Record<string,string> = {}
-  ;(types.value||[]).forEach((t:any)=>{ if(t?.code) m[t.code] = t.uom || 'EA' })
+  ;(types.value || []).forEach((t:any) => { if (t?.code) m[t.code] = t.uom || 'EA' })
   return m
 })
 
 /* ---- Helpers ---- */
 const db = getFirestore()
-const stationId = ref('TAB-01')
+const stationId = ref('GL-01')
 
 const form = ref<{ type: TType, line: string }>({
-  type: 'ST1',
-  line: 'LIQ',  // 기본값은 반드시 LIQ
+  type: 'EL1',
+  line: 'LIQ',
 })
-
-// 상단에서 선택되는 공정 (엘보우에서만 의미 있음)
-const formProcess = ref<string>(TYPE_TO_PROCESS[form.value.type])
 
 function shortLine(line: string) {
   if (line === 'LIQUID') return 'LIQ'
@@ -282,7 +259,13 @@ function formatInch(v: number) {
 }
 
 // itemId: base + (len && len!==0 && len!==1000) ? _len : ''
-function makeItemId(type: string, line: string, inch: number, tag: string, length_mm: number) {
+function makeItemId(
+  type: string,
+  line: string,
+  inch: number,
+  tag: string,
+  length_mm: number
+) {
   let id = `${type}_${shortLine(line)}_${formatInch(inch)}_${tag}`
   const L = Number(length_mm)
   const addLen = Number.isFinite(L) && L !== 0 && L !== 1000
@@ -293,7 +276,7 @@ function makeItemId(type: string, line: string, inch: number, tag: string, lengt
 // itemId 파서(소진문서 필드 세팅용, suffix 없으면 1000으로 간주)
 function parseItemId(id: string) {
   const parts = id.split('_')
-  const [type,line,inchStr,tag,maybeLen] = parts
+  const [type, line, inchStr, tag, maybeLen] = parts
   const inch = Number(inchStr)
   const length_mm = parts.length >= 5 ? Number(maybeLen) : 1000
   return {
@@ -301,25 +284,20 @@ function parseItemId(id: string) {
     line,
     inch: Number.isFinite(inch) ? inch : 0,
     tag,
-    length_mm: Number.isFinite(length_mm) ? length_mm : 1000
+    length_mm: Number.isFinite(length_mm) ? length_mm : 1000,
   }
 }
 
 // masters.processes → code->tag 맵
-const PROC_TAG_MAP = computed<Record<string,string>>(()=>{
+const PROC_TAG_MAP = computed<Record<string,string>>(() => {
   const m: Record<string,string> = {}
-  ;(processes.value||[]).forEach((p:any)=>{ if(p?.code) m[p.code] = p.tag || '' })
+  ;(processes.value || []).forEach((p:any) => { if (p?.code) m[p.code] = p.tag || '' })
   return m
 })
 
-// 상단에서 보여줄 공정 코드
-const mappedProcess = computed(()=>{
-  const t = form.value.type
-  if (isElbowType(t)) return formProcess.value
-  return TYPE_TO_PROCESS[t]
-})
-
-const mappedTag = computed(()=> PROC_TAG_MAP.value[mappedProcess.value] || '')
+// 상단에서 보여줄 공정 코드/태그
+const mappedProcess = computed(() => GLUE_PROCESS_CODE)
+const mappedTag = computed(() => PROC_TAG_MAP.value[GLUE_PROCESS_CODE] || '')
 
 /* ---- Rows ---- */
 type Row = {
@@ -341,7 +319,7 @@ const canUpload = computed(() => !!stationId.value && rows.value.length > 0)
 const inchOptions = ref<number[]>([])
 const loadingInches = ref(false)
 
-// masters(process tag)/type/line 준비되면 즉시 인치 재조회
+// process_tag / type / line 변경 시 인치 재조회
 watch(
   [() => mappedTag.value, () => form.value.type, () => form.value.line],
   ([tag]) => {
@@ -369,23 +347,14 @@ async function refreshInches() {
       const n = typeof inch === 'number' ? inch : Number(inch)
       if (!Number.isNaN(n)) set.add(n)
     })
-    inchOptions.value = Array.from(set).sort((a,b)=>a-b)
-  } finally { loadingInches.value = false }
+    inchOptions.value = Array.from(set).sort((a, b) => a - b)
+  } finally {
+    loadingInches.value = false
+  }
 }
 
 function onTypeChange() {
-  const t = form.value.type
-  if (isElbowType(t)) {
-    const opts = processOptionsFor(t)
-    formProcess.value = opts[0]
-  } else {
-    formProcess.value = TYPE_TO_PROCESS[t]
-  }
-  // mappedProcess / mappedTag 변경 → watch에서 refreshInches 자동 호출
-}
-
-function onFormProcessChange() {
-  // v-model로 formProcess 변경 → mappedProcess/mappedTag 재계산 → watch에서 refreshInches
+  // 타입만 바뀌면 인치 로드는 watch(mappedTag, type, line) 에서 자동 호출
 }
 
 /* ---- Inch 버튼 UI ---- */
@@ -396,7 +365,8 @@ function inchCount(inch: number) {
 }
 function inchButtonClass(inch: number) {
   const c = inchCount(inch)
-  const base = 'relative rounded-xl py-4 text-lg font-medium border-2 transition hover:scale-105 active:scale-95'
+  const base =
+    'relative rounded-xl py-4 text-lg font-medium border-2 transition hover:scale-105 active:scale-95'
   return c > 0
     ? `${base} bg-green-500 text-white border-green-600 shadow-sm`
     : `${base} bg-white text-gray-800 border-gray-300 hover:bg-emerald-50`
@@ -419,12 +389,8 @@ function addCustomInch() {
 function addOrBump(inch: number) {
   const key = (r: Row) => `${r.type}|${r.line}|${r.inch}|${r.length_mm}|${r.process}`
   const L = defaultLenOf(form.value.type)
-
-  const proc = isElbowType(form.value.type)
-    ? formProcess.value
-    : TYPE_TO_PROCESS[form.value.type]
-
-  const tag = PROC_TAG_MAP.value[proc] || ''
+  const proc = GLUE_PROCESS_CODE
+  const tag = mappedTag.value
 
   const newRow: Row = {
     uid: crypto.randomUUID(),
@@ -443,35 +409,15 @@ function addOrBump(inch: number) {
 }
 
 function onRowTypeChange(row: Row) {
-  // 타입이 바뀌면 공정/태그/기본길이 갱신
-  if (isElbowType(row.type)) {
-    const opts = processOptionsFor(row.type)
-    row.process = opts[0]
-  } else {
-    row.process = TYPE_TO_PROCESS[row.type]
-  }
-  row.process_tag = PROC_TAG_MAP.value[row.process] || ''
-  if (row.length_mm == null || row.length_mm === 0 || row.length_mm === 1000) {
-    row.length_mm = defaultLenOf(row.type)
-  }
+  row.process = GLUE_PROCESS_CODE
+  row.process_tag = mappedTag.value
+  row.length_mm = defaultLenOf(row.type)
   syncItemId(row)
 }
 
-function onRowProcessChange(row: Row) {
-  row.process_tag = PROC_TAG_MAP.value[row.process] || ''
-  row.itemId = makeItemId(row.type, row.line, row.inch, row.process_tag, row.length_mm)
-}
-
 function syncItemId(row: Row) {
-  if (!isElbowType(row.type)) {
-    row.process = TYPE_TO_PROCESS[row.type]
-  } else {
-    const opts = processOptionsFor(row.type)
-    if (!opts.includes(row.process)) {
-      row.process = opts[0]
-    }
-  }
-  row.process_tag = PROC_TAG_MAP.value[row.process] || ''
+  row.process = GLUE_PROCESS_CODE
+  row.process_tag = mappedTag.value
   row.itemId = makeItemId(row.type, row.line, row.inch, row.process_tag, row.length_mm)
 }
 
@@ -486,27 +432,31 @@ async function upsertItemIfNeeded(row: Row) {
   const snap = await getDoc(refItem)
   if (snap.exists()) return
 
-  await setDoc(refItem, {
-    itemId: row.itemId,
-    type: row.type,
-    line: shortLine(row.line),
-    inch: row.inch,
-    length_mm: row.length_mm,
-    process: row.process,
-    process_tag: row.process_tag,
-    product_level: 3, // 반제품
-    uom: TYPE_UOM_MAP.value[row.type] || 'EA',
-    active: true,
-    created_at: serverTimestamp(),
-    updated_at: serverTimestamp(),
-  }, { merge: true })
+  await setDoc(
+    refItem,
+    {
+      itemId: row.itemId,
+      type: row.type,
+      line: shortLine(row.line),
+      inch: row.inch,
+      length_mm: row.length_mm,
+      process: row.process,
+      process_tag: row.process_tag,
+      product_level: 3, // 반제품
+      uom: TYPE_UOM_MAP.value[row.type] || 'EA',
+      active: true,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    },
+    { merge: true }
+  )
 }
 
 // lotId: YYYYMMDD
 function yyyymmdd(d = new Date()) {
   const yy = d.getFullYear()
-  const mm = String(d.getMonth()+1).padStart(2,'0')
-  const dd = String(d.getDate()).padStart(2,'0')
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
   return `${yy}${mm}${dd}`
 }
 
@@ -522,7 +472,7 @@ async function upload() {
       // 1) items 업서트
       await upsertItemIfNeeded(r)
 
-      // 2) 생산 실적 문서
+      // 2) 생산 실적 문서 (Glue 생산)
       const lotIdParent = `${r.itemId}_${today}`
       const prodDoc = {
         ts: tsNow,
@@ -542,6 +492,8 @@ async function upload() {
       await addDoc(colProd, prodDoc)
 
       // 3) BOM 소진 생성: parentId == r.itemId
+      //    여기서 childId 들이 Cutting_Elbow(ce) 아이템이면,
+      //    ce 자재들이 자동으로 소진됨.
       const qBom = query(collection(db, 'bom'), where('parentId', '==', r.itemId))
       const bomSnap = await getDocs(qBom)
       if (!bomSnap.empty) {
@@ -552,7 +504,7 @@ async function upload() {
             ts: tsNow,
             lotId: lotIdParent,     // 부모 lotId와 묶음
             parentId: parentId,     // 어떤 부모로 소진됐는지
-            itemId: childId,        // 소진된 자재
+            itemId: childId,        // 소진된 자재 (Cutting_Elbow 계열)
             type: childParsed.type,
             line: childParsed.line,
             inch: childParsed.inch,
@@ -571,7 +523,9 @@ async function upload() {
 
     clearAll()
     alert('업로드 완료!')
-  } finally { uploading.value = false }
+  } finally {
+    uploading.value = false
+  }
 }
 </script>
 

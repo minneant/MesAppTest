@@ -66,7 +66,8 @@
           <ul v-if="openGroup==='생산실적 입력'" class="dropdown">
             <li><RouterLink class="dd-link" to="/produce-foaming"    @click="close()">발포 공정</RouterLink></li>
             <li><RouterLink class="dd-link" to="/produce-frp"        @click="close()">FRP 공정</RouterLink></li>
-            <li><RouterLink class="dd-link" to="/produce-finishing"  @click="close()">가공 공정</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/produce-glue"        @click="close()">글루 공정</RouterLink></li>
+            <li><RouterLink class="dd-link" to="/produce-finishing"  @click="close()">가공/커팅 공정</RouterLink></li>
             <li><RouterLink class="dd-link" to="/produce-packaging"  @click="close()">포장 공정</RouterLink></li>
           </ul>
         </li>

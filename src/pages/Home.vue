@@ -30,7 +30,8 @@
         <div class="links">
           <RouterLink class="link" to="/produce-foaming">발포 공정</RouterLink>
           <RouterLink class="link" to="/produce-frp">FRP 공정</RouterLink>
-          <RouterLink class="link" to="/produce-finishing">가공 공정</RouterLink>
+          <RouterLink class="link" to="/produce-glue">글루 공정</RouterLink>
+          <RouterLink class="link" to="/produce-finishing">가공/커팅 공정</RouterLink>
           <RouterLink class="link" to="/produce-packaging">포장 공정</RouterLink>
         </div>
       </div>
